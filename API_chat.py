@@ -1,5 +1,5 @@
 # API(chat_web): API_chat.py
-# v4.1.1 - "WHATSAPP NO LUGAR DO APP + QR 2 FASES + FRONT COMPAT + CODIGO_QR"
+# v4.1.2 - "WHATSAPP NO LUGAR DO APP + QR 2 FASES + FRONT COMPAT + CODIGO_QR + FIX VPS"
 # =====================================================================================
 # FLUXO:
 # 1) 1ª leitura do QR -> /qr/scan decide "cadastro"
@@ -12,6 +12,7 @@
 # OBS:
 # - mantém fluxo legado por login_vinculo
 # - adiciona compatibilidade com codigo_qr sem quebrar front existente
+# - ajustes para VPS / Hostinger / produção
 # =====================================================================================
 
 from typing import List, Optional, Dict, Any
@@ -34,9 +35,9 @@ from starlette.requests import Request as StarletteRequest
 import threading
 import math
 
-app = FastAPI()
+app = FastAPI(title="API Chat Pulseira Inteligente")
 
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "true").strip().lower() == "true"
 
 # =========================
 # WHATSAPP CLOUD API
@@ -50,6 +51,43 @@ WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "ray_edvenced_webhook
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 
 # =========================
+# =========================================
+# 🔐 CONFIGURAÇÃO GERAL
+# =========================================
+DEBUG=false
+
+# =========================================
+# 🗄️ BANCO DE DADOS (MYSQL)
+# =========================================
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USER=api_user
+DB_PASSWORD=2710@Majo
+DB_NAME=ray_edvenced_zap
+
+# =========================================
+# 📱 WHATSAPP CLOUD API
+# =========================================
+WHATSAPP_ENABLED=true
+
+# 🔑 TOKEN PERMANENTE (Meta)
+WHATSAPP_TOKEN=EAAmFbo01VcEBRG1ZCD2OZCeicFEK73F18uJ5sl9ROlLi3fe9JZCpRj8R7EvRRHLZAKMyUWlsfHx9CgBCwF2QaWz59wGzZC8CgC4r12VIQfSiBQyBZCltuGZCb7gUYuv8PllBT1mKZABcEZCdx0sK51u3ylDggMiSr2NMzJ2ZCenHqTrn6nT5vfiNeUgdz4rtRZAlwZDZD
+
+# 📞 ID DO NÚMERO (Phone Number ID)
+WHATSAPP_PHONE_NUMBER_ID=21997526745
+
+# 🏢 ID DO BUSINESS (WABA)
+WHATSAPP_WABA_ID=1008770942327190
+
+# 🔄 VERSÃO DA API
+WHATSAPP_API_VERSION=v22.0
+
+# 🔐 TOKEN DE VERIFICAÇÃO DO WEBHOOK
+WHATSAPP_VERIFY_TOKEN=ray_edvenced_webhook_2026
+
+# 🌐 URL PÚBLICA (IMPORTANTE PRA FOTO/LOCALIZAÇÃO)
+PUBLIC_BASE_URL=https://api.edvenced.com.br
+# =========================================
 # LONG-POLL VOLUNTÁRIO
 # =========================
 _POLL_EVENTS: Dict[tuple, threading.Event] = {}
@@ -127,6 +165,7 @@ def _log_exc(prefix: str, e: Exception):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -134,8 +173,10 @@ app.add_middleware(
 # =========================
 # UPLOAD DIRS
 # =========================
-AUDIOS_DIR = "audios_upload"
-FOTOS_DIR = "fotos_upload"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+AUDIOS_DIR = os.path.join(BASE_DIR, "audios_upload")
+FOTOS_DIR = os.path.join(BASE_DIR, "fotos_upload")
+
 os.makedirs(AUDIOS_DIR, exist_ok=True)
 os.makedirs(FOTOS_DIR, exist_ok=True)
 
@@ -149,12 +190,13 @@ DBCFG = {
     "host": os.getenv("DB_HOST", "127.0.0.1"),
     "port": int(os.getenv("DB_PORT", "3306")),
     "user": os.getenv("DB_USER", "api_user"),
-    "password": os.getenv("DB_PASSWORD", "ray@2710Majo"),
+    "password": os.getenv("DB_PASSWORD", ""),
     "database": os.getenv("DB_NAME", "ray_edvenced_zap"),
     "auth_plugin": os.getenv("DB_AUTH_PLUGIN", "mysql_native_password"),
-    "connection_timeout": 5,
+    "connection_timeout": 10,
 }
 _pool = None
+
 
 # =========================
 # HELPERS GERAIS
@@ -318,7 +360,7 @@ async def log_requests(request: StarletteRequest, call_next):
         else:
             info["body"] = "<skipped>"
 
-        _log("REQ", info)
+        _dbg("REQ", info)
     except Exception as e:
         _log_exc("Falha ao logar request", e)
 
@@ -327,7 +369,7 @@ async def log_requests(request: StarletteRequest, call_next):
 
     request2 = StarletteRequest(request.scope, receive)
     response = await call_next(request2)
-    _log("RESP", {"status_code": response.status_code, "path": request.url.path})
+    _dbg("RESP", {"status_code": response.status_code, "path": request.url.path})
     return response
 
 
@@ -349,6 +391,7 @@ def _init_db():
             id INT AUTO_INCREMENT PRIMARY KEY,
             nome VARCHAR(120) NULL,
             telefone VARCHAR(20) NULL,
+            whatsapp VARCHAR(20) NULL,
             created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         """,
@@ -365,7 +408,10 @@ def _init_db():
             id INT AUTO_INCREMENT PRIMARY KEY,
             login_vinculo VARCHAR(120) NULL,
             codigo_qr VARCHAR(255) NULL,
+            responsavel_id INT NULL,
+            nome_dependente VARCHAR(120) NULL,
             ativo TINYINT NOT NULL DEFAULT 1,
+            ativada TINYINT NOT NULL DEFAULT 0,
             created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         """,
@@ -375,6 +421,14 @@ def _init_db():
             pulseira_id INT NULL,
             responsavel_id INT NULL,
             voluntario_id INT NULL,
+            tipo_vulneravel VARCHAR(30) NULL,
+            foto_arquivo VARCHAR(255) NULL,
+            status VARCHAR(20) NULL DEFAULT 'pendente',
+            voluntario_presente TINYINT NOT NULL DEFAULT 0,
+            envio_de_localizacao TINYINT NOT NULL DEFAULT 0,
+            onboarding_whatsapp_enviado TINYINT NOT NULL DEFAULT 0,
+            onboarding_whatsapp_enviado_em DATETIME NULL,
+            whatsapp_ultimo_erro TEXT NULL,
             created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         """,
@@ -426,7 +480,10 @@ def _init_db():
 
         _try_add_column(cur, "pulseiras_qr", "login_vinculo VARCHAR(120) NULL")
         _try_add_column(cur, "pulseiras_qr", "codigo_qr VARCHAR(255) NULL")
+        _try_add_column(cur, "pulseiras_qr", "responsavel_id INT NULL")
+        _try_add_column(cur, "pulseiras_qr", "nome_dependente VARCHAR(120) NULL")
         _try_add_column(cur, "pulseiras_qr", "ativo TINYINT NOT NULL DEFAULT 1")
+        _try_add_column(cur, "pulseiras_qr", "ativada TINYINT NOT NULL DEFAULT 0")
         _try_add_column(cur, "pulseiras_qr", "created_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP")
 
         _try_add_column(cur, "responsaveis", "whatsapp VARCHAR(20) NULL")
@@ -467,6 +524,7 @@ def _init_db():
 
         _try_create_index(cur, "CREATE INDEX idx_pulseiras_login_vinculo ON pulseiras_qr(login_vinculo)")
         _try_create_index(cur, "CREATE INDEX idx_pulseiras_codigo_qr ON pulseiras_qr(codigo_qr)")
+        _try_create_index(cur, "CREATE INDEX idx_pulseiras_resp_id ON pulseiras_qr(responsavel_id)")
         _try_create_index(cur, "CREATE INDEX idx_resp_tel ON responsaveis(telefone)")
         _try_create_index(cur, "CREATE INDEX idx_resp_whatsapp ON responsaveis(whatsapp)")
         _try_create_index(cur, "CREATE INDEX idx_vol_tel ON voluntarios(telefone)")
@@ -482,13 +540,14 @@ def _init_db():
             cur.execute("UPDATE mensagens SET status='pendente' WHERE status IS NULL OR status=''")
         except Exception:
             pass
+
         try:
             cur.execute("UPDATE encontros SET status='pendente' WHERE status IS NULL OR status=''")
         except Exception:
             pass
 
         cnx.commit()
-        print("✅ Banco OK (v4.1.1).", flush=True)
+        print("✅ Banco OK (v4.1.2).", flush=True)
     finally:
         cur.close()
         cnx.close()
@@ -669,18 +728,10 @@ def _ensure_pulseira_qr_slot(cur, codigo_qr: str) -> int:
     if info:
         return int(info["id"])
 
-    cols = ["codigo_qr", "ativo"]
-    vals = [cq, 1]
-
-    if _column_exists(cur, "pulseiras_qr", "ativada"):
-        cols.append("ativada")
-        vals.append(0)
-
-    sql = f"""
-        INSERT INTO pulseiras_qr ({", ".join(cols)})
-        VALUES ({", ".join(["%s"] * len(vals))})
-    """
-    cur.execute(sql, tuple(vals))
+    cur.execute("""
+        INSERT INTO pulseiras_qr (codigo_qr, ativo, ativada)
+        VALUES (%s, 1, 0)
+    """, (cq,))
     return int(cur.lastrowid)
 
 
@@ -696,7 +747,6 @@ def _ensure_pulseira(
     if not lv:
         raise HTTPException(400, "login_vinculo/id_pulseira inválido.")
 
-    # 1) tenta por login_vinculo (fluxo legado)
     cur.execute("""
         SELECT id
         FROM pulseiras_qr
@@ -709,39 +759,28 @@ def _ensure_pulseira(
     if row and row[0]:
         pulseira_id = int(row[0])
 
-        if responsavel_id is not None and _column_exists(cur, "pulseiras_qr", "responsavel_id"):
-            try:
-                cur.execute("""
-                    UPDATE pulseiras_qr
-                    SET responsavel_id=%s
-                    WHERE id=%s
-                """, (int(responsavel_id), pulseira_id))
-            except Exception as e:
-                _log_exc("Aviso ao atualizar responsavel_id da pulseira", e)
+        if responsavel_id is not None:
+            cur.execute("""
+                UPDATE pulseiras_qr
+                SET responsavel_id=%s
+                WHERE id=%s
+            """, (int(responsavel_id), pulseira_id))
 
-        if cq and _column_exists(cur, "pulseiras_qr", "codigo_qr"):
-            try:
-                cur.execute("""
-                    UPDATE pulseiras_qr
-                    SET codigo_qr=%s
-                    WHERE id=%s AND (codigo_qr IS NULL OR codigo_qr='')
-                """, (cq, pulseira_id))
-            except Exception as e:
-                _log_exc("Aviso ao atualizar codigo_qr da pulseira", e)
+        if cq:
+            cur.execute("""
+                UPDATE pulseiras_qr
+                SET codigo_qr=%s
+                WHERE id=%s AND (codigo_qr IS NULL OR codigo_qr='')
+            """, (cq, pulseira_id))
 
-        if _column_exists(cur, "pulseiras_qr", "ativada"):
-            try:
-                cur.execute("""
-                    UPDATE pulseiras_qr
-                    SET ativada=1
-                    WHERE id=%s
-                """, (pulseira_id,))
-            except Exception as e:
-                _log_exc("Aviso ao ativar pulseira", e)
+        cur.execute("""
+            UPDATE pulseiras_qr
+            SET ativada=1
+            WHERE id=%s
+        """, (pulseira_id,))
 
         return pulseira_id
 
-    # 2) tenta usar slot já existente por codigo_qr
     if cq:
         info_qr = _resolve_pulseira_por_codigo_qr(cur, cq)
         if info_qr:
@@ -751,44 +790,28 @@ def _ensure_pulseira(
             if login_existente and login_existente != lv:
                 raise HTTPException(409, f"codigo_qr já vinculado a outro login_vinculo: {login_existente}")
 
-            sets = ["login_vinculo=%s"]
-            vals = [lv]
-
-            if responsavel_id is not None and _column_exists(cur, "pulseiras_qr", "responsavel_id"):
-                sets.append("responsavel_id=%s")
-                vals.append(int(responsavel_id))
-
-            if _column_exists(cur, "pulseiras_qr", "ativada"):
-                sets.append("ativada=1")
-
-            vals.append(pulseira_id)
-
-            sql = f"""
+            cur.execute("""
                 UPDATE pulseiras_qr
-                SET {", ".join(sets)}
+                SET login_vinculo=%s,
+                    responsavel_id=COALESCE(%s, responsavel_id),
+                    ativada=1
                 WHERE id=%s
-            """
-            cur.execute(sql, tuple(vals))
+            """, (lv, responsavel_id, pulseira_id))
             return pulseira_id
 
-    # 3) cria novo
-    cols = ["login_vinculo", "ativo"]
-    vals = [lv, 1]
+    cols = ["login_vinculo", "ativo", "ativada"]
+    vals = [lv, 1, 1]
 
-    if cq and _column_exists(cur, "pulseiras_qr", "codigo_qr"):
+    if cq:
         cols.append("codigo_qr")
         vals.append(cq)
     else:
         cols.append("codigo_qr")
         vals.append(lv)
 
-    if responsavel_id is not None and _column_exists(cur, "pulseiras_qr", "responsavel_id"):
+    if responsavel_id is not None:
         cols.append("responsavel_id")
         vals.append(int(responsavel_id))
-
-    if _column_exists(cur, "pulseiras_qr", "ativada"):
-        cols.append("ativada")
-        vals.append(1)
 
     sql = f"""
         INSERT INTO pulseiras_qr ({", ".join(cols)})
@@ -826,9 +849,6 @@ def _resolve_encontro_por_pulseira_id(cur, pulseira_id: int) -> Optional[int]:
 
 
 def _resolve_encontro_pendente_por_pulseira_id(cur, pulseira_id: int) -> Optional[int]:
-    if not _column_exists(cur, "encontros", "status"):
-        return _resolve_encontro_por_pulseira_id(cur, pulseira_id)
-
     cur.execute("""
         SELECT id
         FROM encontros
@@ -878,6 +898,7 @@ def _resolve_voluntario_por_telefone(cur, tel: Optional[str]) -> Optional[Dict[s
         SELECT id, nome, telefone
         FROM voluntarios
         WHERE telefone=%s
+        ORDER BY id DESC
         LIMIT 1
     """, (d,))
     row = cur.fetchone()
@@ -912,6 +933,7 @@ def _aprender_voluntario_no_encontro(cur, encontro_id: int, voluntario_id: Optio
     vid = voluntario_id
     vnome = (voluntario_nome or "").strip() or None
     vtel = _only_digits(voluntario_telefone or "") or None
+
     if vtel and not _is_tel_valido_br(vtel):
         vtel = None
 
@@ -926,13 +948,8 @@ def _aprender_voluntario_no_encontro(cur, encontro_id: int, voluntario_id: Optio
         cur.execute("""
             INSERT INTO voluntarios (nome, telefone)
             VALUES (%s, %s)
-            ON DUPLICATE KEY UPDATE nome=COALESCE(VALUES(nome), nome)
         """, (vnome or "Voluntário", vtel))
-        info = _resolve_voluntario_por_telefone(cur, vtel)
-        if info:
-            vid = info["id"]
-            if not vnome:
-                vnome = info["nome"]
+        vid = int(cur.lastrowid)
 
     cur.execute("""
         UPDATE encontros
@@ -959,6 +976,7 @@ def _get_encontro_core(cur, encontro_id: int):
             e.onboarding_whatsapp_enviado_em,
             e.whatsapp_ultimo_erro,
             p.login_vinculo,
+            p.nome_dependente,
             r.nome,
             r.telefone,
             COALESCE(r.whatsapp, r.telefone),
@@ -1010,77 +1028,38 @@ def _get_ultima_localizacao_para_encontro(cur, encontro_id: int):
 # =========================
 # WHATSAPP HELPERS
 # =========================
-def _is_whatsapp_ready() -> bool:
-    return (
-        WHATSAPP_ENABLED
-        and bool(WHATSAPP_TOKEN)
-        and bool(WHATSAPP_PHONE_NUMBER_ID)
-        and bool(WHATSAPP_API_VERSION)
-    )
+# =========================
+# WHATSAPP HELPERS (ATUALIZADO COM TEMPLATE APROVADO)
+# =========================
+
+WHATSAPP_TEMPLATE_NAME = os.getenv("WHATSAPP_TEMPLATE_NAME", "alerta_de_localizacao").strip()
+WHATSAPP_TEMPLATE_LANG = os.getenv("WHATSAPP_TEMPLATE_LANG", "pt_BR").strip()
 
 
-def _wa_headers() -> Dict[str, str]:
-    return {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
-
-def _wa_messages_url() -> str:
-    return f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-
-
-def _to_public_url(path_or_url: Optional[str]) -> Optional[str]:
-    s = (path_or_url or "").strip()
-    if not s:
-        return None
-    if s.startswith("http://") or s.startswith("https://"):
-        return s
-    if not PUBLIC_BASE_URL:
-        return None
-    if not s.startswith("/"):
-        s = "/" + s
-    return f"{PUBLIC_BASE_URL}{s}"
-
-
-def _wa_post(payload: Dict[str, Any]) -> Dict[str, Any]:
-    if not _is_whatsapp_ready():
-        return {"ok": False, "error": "whatsapp_not_configured"}
-
-    try:
-        r = requests.post(
-            _wa_messages_url(),
-            headers=_wa_headers(),
-            json=payload,
-            timeout=30
-        )
-        try:
-            body = r.json()
-        except Exception:
-            body = {"raw": r.text}
-
-        return {
-            "ok": 200 <= r.status_code < 300,
-            "status_code": r.status_code,
-            "body": body,
-        }
-    except Exception as e:
-        return {"ok": False, "error": repr(e)}
-
-
-def _wa_send_text(to: str, body_text: str) -> Dict[str, Any]:
+def _wa_send_template(to: str, nome, tipo, voluntario):
     payload = {
         "messaging_product": "whatsapp",
         "to": _only_digits(to),
-        "type": "text",
-        "text": {"body": body_text},
+        "type": "template",
+        "template": {
+            "name": WHATSAPP_TEMPLATE_NAME,
+            "language": {"code": WHATSAPP_TEMPLATE_LANG},
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "text": nome or "Pessoa"},
+                        {"type": "text", "text": tipo or "Não informado"},
+                        {"type": "text", "text": voluntario or "Voluntário"},
+                    ],
+                }
+            ],
+        },
     }
     return _wa_post(payload)
 
 
-def _wa_send_location(to: str, latitude: float, longitude: float,
-                      name: str = "Localização do voluntário",
-                      address: str = "Atendimento em andamento") -> Dict[str, Any]:
+def _wa_send_location(to: str, latitude: float, longitude: float):
     payload = {
         "messaging_product": "whatsapp",
         "to": _only_digits(to),
@@ -1088,45 +1067,31 @@ def _wa_send_location(to: str, latitude: float, longitude: float,
         "location": {
             "latitude": latitude,
             "longitude": longitude,
-            "name": name,
-            "address": address,
+            "name": "Localização do voluntário",
+            "address": "Atendimento em andamento",
         },
     }
     return _wa_post(payload)
 
 
-def _wa_send_image_by_link(to: str, image_url: str, caption: Optional[str] = None) -> Dict[str, Any]:
-    image_obj = {"link": image_url}
-    if caption:
-        image_obj["caption"] = caption
-
+def _wa_send_image_by_link(to: str, image_url: str):
     payload = {
         "messaging_product": "whatsapp",
         "to": _only_digits(to),
         "type": "image",
-        "image": image_obj,
+        "image": {
+            "link": image_url,
+            "caption": "Foto enviada para identificação.",
+        },
     }
     return _wa_post(payload)
 
 
-def _build_whatsapp_summary(
-    nome_responsavel: Optional[str],
-    nome_vulneravel: Optional[str],
-    tipo_vulneravel: Optional[str],
-    nome_voluntario: Optional[str],
-    telefone_voluntario: Optional[str]
-) -> str:
-    return (
-        f"🚨 Olá, {(nome_responsavel or 'responsável').strip()}.\n\n"
-        f"Um voluntário iniciou atendimento para {(nome_vulneravel or 'a pessoa cadastrada').strip()}.\n"
-        f"Tipo de vulnerável: {(tipo_vulneravel or 'não informado').strip()}\n"
-        f"Voluntário: {(nome_voluntario or 'Voluntário').strip()}\n"
-        f"Telefone do voluntário: {(_only_digits(telefone_voluntario or '') or 'não informado')}\n\n"
-        "A seguir enviamos localização e foto para identificação."
-    )
+# =========================
+# ENVIO PRINCIPAL (AJUSTADO)
+# =========================
+def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
-
-def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int) -> Dict[str, Any]:
     row = _get_encontro_core(cur, encontro_id)
     if not row:
         return {"ok": False, "error": "encontro_not_found"}
@@ -1146,6 +1111,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int) -> Dict[str, Any]:
         onboarding_whatsapp_enviado_em,
         whatsapp_ultimo_erro,
         login_vinculo,
+        nome_vulneravel,
         nome_responsavel,
         telefone_responsavel,
         responsavel_whatsapp,
@@ -1154,211 +1120,61 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int) -> Dict[str, Any]:
     ) = row
 
     if not responsavel_whatsapp:
-        return {"ok": False, "error": "responsavel_whatsapp_missing"}
+        return {"ok": False}
 
     if int(onboarding_whatsapp_enviado or 0) == 1:
         return {"ok": True, "info": "already_sent"}
 
-    if not tipo_vulneravel:
-        return {"ok": False, "error": "tipo_vulneravel_missing"}
-
-    if not foto_arquivo:
-        return {"ok": False, "error": "foto_missing"}
+    if not tipo_vulneravel or not foto_arquivo:
+        return {"ok": False}
 
     loc = _get_ultima_loc_voluntario(cur, int(eid))
     if not loc:
-        return {"ok": False, "error": "volunteer_location_missing"}
+        return {"ok": False}
 
-    lat, lng, acc, created_loc, loc_voluntario_id, loc_vol_nome, loc_vol_tel = loc
+    lat, lng = loc[0], loc[1]
 
-    foto_publica = _to_public_url(f"/media/fotos/{foto_arquivo}")
-    if not foto_publica:
-        return {"ok": False, "error": "foto_url_not_public"}
+    foto_url = _to_public_url(f"/media/fotos/{foto_arquivo}")
+    if not foto_url:
+        return {"ok": False}
 
-    nome_vol_final = nome_voluntario or loc_vol_nome
-    tel_vol_final = voluntario_telefone or loc_vol_tel
-
-    resultados = {}
-
-    txt = _build_whatsapp_summary(
-        nome_responsavel=nome_responsavel,
-        nome_vulneravel=None,
-        tipo_vulneravel=tipo_vulneravel,
-        nome_voluntario=nome_vol_final,
-        telefone_voluntario=tel_vol_final
+    # 🔥 TEMPLATE APROVADO
+    r1 = _wa_send_template(
+        _to_wa_number(responsavel_whatsapp),
+        nome_vulneravel,
+        tipo_vulneravel,
+        nome_voluntario
     )
-    resultados["texto"] = _wa_send_text(_to_wa_number(responsavel_whatsapp), txt)
 
-    if not resultados["texto"].get("ok"):
-        cur.execute("""
-            UPDATE encontros
-            SET whatsapp_ultimo_erro=%s
-            WHERE id=%s
-        """, (json.dumps(resultados["texto"], ensure_ascii=False), int(eid)))
-        return {"ok": False, "error": "text_send_failed", "detail": resultados["texto"]}
+    if not r1.get("ok"):
+        return {"ok": False, "error": "template_failed", "detail": r1}
 
-    resultados["localizacao"] = _wa_send_location(
+    # 📍 LOCALIZAÇÃO
+    r2 = _wa_send_location(
         _to_wa_number(responsavel_whatsapp),
         float(lat),
-        float(lng),
-        name="Localização do voluntário",
-        address="Atendimento em andamento"
+        float(lng)
     )
 
-    resultados["imagem"] = _wa_send_image_by_link(
+    # 📸 FOTO
+    r3 = _wa_send_image_by_link(
         _to_wa_number(responsavel_whatsapp),
-        foto_publica,
-        caption="Foto enviada pelo voluntário para identificação."
+        foto_url
     )
 
     cur.execute("""
         UPDATE encontros
         SET onboarding_whatsapp_enviado=1,
-            onboarding_whatsapp_enviado_em=NOW(),
-            whatsapp_ultimo_erro=NULL
+            onboarding_whatsapp_enviado_em=NOW()
         WHERE id=%s
     """, (int(eid),))
 
     return {
         "ok": True,
-        "encontro_id": int(eid),
-        "login_vinculo": login_vinculo,
-        "resultados": resultados,
+        "template": r1,
+        "location": r2,
+        "image": r3
     }
-
-
-def _forward_volunteer_text_to_whatsapp(cur, encontro_id: int, texto: str) -> Dict[str, Any]:
-    row = _get_encontro_core(cur, encontro_id)
-    if not row:
-        return {"ok": False, "error": "encontro_not_found"}
-
-    (
-        eid,
-        pulseira_id,
-        responsavel_id,
-        voluntario_id,
-        created_at,
-        tipo_vulneravel,
-        foto_arquivo,
-        status,
-        voluntario_presente,
-        envio_de_localizacao,
-        onboarding_whatsapp_enviado,
-        onboarding_whatsapp_enviado_em,
-        whatsapp_ultimo_erro,
-        login_vinculo,
-        nome_responsavel,
-        telefone_responsavel,
-        responsavel_whatsapp,
-        nome_voluntario,
-        voluntario_telefone
-    ) = row
-
-    if not responsavel_whatsapp:
-        return {"ok": False, "error": "responsavel_whatsapp_missing"}
-
-    body = (
-        f"💬 Mensagem do voluntário\n\n"
-        f"Voluntário: {(nome_voluntario or 'Voluntário').strip()}\n"
-        f"Telefone: {(_only_digits(voluntario_telefone or '') or 'não informado')}\n\n"
-        f"Mensagem:\n{texto}"
-    )
-    return _wa_send_text(_to_wa_number(responsavel_whatsapp), body)
-
-
-# =========================
-# HEALTH / QR
-# =========================
-@app.get("/", tags=["default"])
-def health():
-    return {"status": "online", "api": "API_chat.py v4.1.1"}
-
-
-@app.get("/debug/whoami", tags=["default"])
-def debug_whoami():
-    return {
-        "ok": True,
-        "api": "API_chat.py v4.1.1",
-        "host": DBCFG.get("host"),
-        "db": DBCFG.get("database"),
-        "time": _now_str(),
-        "whatsapp_ready": _is_whatsapp_ready(),
-        "public_base_url": PUBLIC_BASE_URL,
-    }
-
-
-@app.get("/debug/ping_db", tags=["default"])
-def debug_ping_db():
-    try:
-        cnx, cur = _open_cursor()
-        cur.execute("SELECT DATABASE(), USER(), VERSION()")
-        db, user, version = cur.fetchone()
-        return {"ok": True, "database": db, "user": user, "version": version}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    finally:
-        try:
-            cur.close()
-            cnx.close()
-        except Exception:
-            pass
-
-
-@app.get("/qr/scan", response_model=QrScanOut, tags=["qr"])
-def qr_scan(codigo_qr: str = Query(..., min_length=1, max_length=255)):
-    cq = (codigo_qr or "").strip()
-    if not cq:
-        raise HTTPException(400, "codigo_qr inválido.")
-
-    cnx, cur = _open_cursor()
-    try:
-        info = _resolve_pulseira_por_codigo_qr(cur, cq)
-
-        if not info:
-            pulseira_id = _ensure_pulseira_qr_slot(cur, cq)
-            cnx.commit()
-            return QrScanOut(
-                ok=True,
-                codigo_qr=cq,
-                proximo_passo="cadastro",
-                pulseira_id=int(pulseira_id),
-                responsavel_id=None,
-                login_vinculo=None,
-            )
-
-        login_vinculo = (info.get("login_vinculo") or "").strip()
-        responsavel_id = info.get("responsavel_id")
-
-        if not login_vinculo:
-            return QrScanOut(
-                ok=True,
-                codigo_qr=cq,
-                proximo_passo="cadastro",
-                pulseira_id=int(info["id"]),
-                responsavel_id=responsavel_id,
-                login_vinculo=None,
-            )
-
-        return QrScanOut(
-            ok=True,
-            codigo_qr=cq,
-            proximo_passo="onboarding",
-            pulseira_id=int(info["id"]),
-            responsavel_id=responsavel_id,
-            login_vinculo=login_vinculo,
-        )
-
-    except HTTPException:
-        cnx.rollback()
-        raise
-    except Exception as e:
-        cnx.rollback()
-        _log_exc("Erro em /qr/scan", e)
-        raise HTTPException(500, "Falha ao consultar QR.")
-    finally:
-        cur.close()
-        cnx.close()
-
 
 # =========================
 # CADASTRO / PRIMEIRA LEITURA
@@ -1407,15 +1223,11 @@ def cadastro_ativar_pulseira(payload: CadastroUsuarioIn):
             codigo_qr=codigo_qr
         )
 
-        try:
-            if _column_exists(cur, "pulseiras_qr", "nome_dependente"):
-                cur.execute("""
-                    UPDATE pulseiras_qr
-                    SET nome_dependente=%s
-                    WHERE id=%s
-                """, (nome_vulneravel, int(pulseira_id)))
-        except Exception as e:
-            _log_exc("Aviso ao salvar nome_dependente na pulseira", e)
+        cur.execute("""
+            UPDATE pulseiras_qr
+            SET nome_dependente=%s
+            WHERE id=%s
+        """, (nome_vulneravel, int(pulseira_id)))
 
         encontro_id = _ensure_encontro(
             cur,
@@ -1693,14 +1505,13 @@ def encontro_tipo_vulneravel(payload: TipoVulneravelIn):
             WHERE id=%s
         """, (tipo, int(encontro_id)))
 
-        cnx.commit()
-
         try:
             wa_result = _maybe_send_onboarding_to_whatsapp(cur, int(encontro_id))
-            cnx.commit()
             _dbg("WHATSAPP/TIPO_TRIGGER", wa_result)
         except Exception as e:
             _log_exc("Erro ao tentar disparar WhatsApp após /encontro/tipo_vulneravel", e)
+
+        cnx.commit()
 
         return {
             "ok": True,
@@ -1763,6 +1574,7 @@ def buscar_encontro_pendente(
             onboarding_whatsapp_enviado_em,
             whatsapp_ultimo_erro,
             login_vinculo_db,
+            nome_vulneravel,
             nome_responsavel,
             telefone_responsavel,
             responsavel_whatsapp,
@@ -1781,6 +1593,7 @@ def buscar_encontro_pendente(
             "nome_responsavel": nome_responsavel,
             "telefone_responsavel": telefone_responsavel,
             "responsavel_whatsapp": responsavel_whatsapp,
+            "nome_vulneravel": nome_vulneravel,
             "voluntario_id": int(voluntario_id) if voluntario_id else None,
             "nome_voluntario": nome_voluntario or "Voluntário",
             "voluntario_telefone": voluntario_telefone,
@@ -1841,7 +1654,7 @@ async def receber_foto(
             raise HTTPException(404, "Encontro não encontrado.")
 
         login_vinculo_db = row[13]
-        telefone_alvo_final = row[15] or None
+        telefone_alvo_final = row[16] or None
 
         filename = _unique_photo_name(foto.filename or "captura.png")
         path = os.path.join(FOTOS_DIR, filename)
@@ -1880,15 +1693,14 @@ async def receber_foto(
         if origem_lc == "voluntario":
             _aprender_voluntario_no_encontro(cur, int(encontro_id), None, nome, tel_origem)
 
-        cnx.commit()
-
         if origem_lc == "voluntario":
             try:
                 wa_result = _maybe_send_onboarding_to_whatsapp(cur, int(encontro_id))
-                cnx.commit()
                 _dbg("WHATSAPP/FOTO_TRIGGER", wa_result)
             except Exception as e:
                 _log_exc("Erro ao tentar disparar WhatsApp após /foto", e)
+
+        cnx.commit()
 
         return {
             "ok": True,
@@ -1952,7 +1764,7 @@ def enviar_texto(payload: MensagemTextoIn):
             raise HTTPException(404, "Encontro não encontrado.")
 
         login_vinculo_db = row[13]
-        telefone_alvo_final = row[15] or None
+        telefone_alvo_final = row[16] or None
 
         if origem == "voluntario":
             cur.execute("""
@@ -2065,7 +1877,7 @@ async def enviar_audio(
             raise HTTPException(404, "Encontro não encontrado.")
 
         login_vinculo_db = row[13]
-        telefone_alvo_final = row[15] or None
+        telefone_alvo_final = row[16] or None
 
         nome = (nome_origem or "").strip() or ("Voluntário" if origem_lc == "voluntario" else "Usuário")
         tel_origem = _only_digits(telefone_origem or "") or None
@@ -2325,8 +2137,6 @@ def salvar_localizacao(payload: LocalizacaoIn):
         if not row:
             raise HTTPException(404, "Encontro não encontrado.")
 
-        login_vinculo_db = row[13]
-
         cur.execute("""
             INSERT INTO localizacoes
               (encontro_id, voluntario_id, voluntario_nome, voluntario_telefone, latitude, longitude, accuracy, ts_client)
@@ -2346,15 +2156,14 @@ def salvar_localizacao(payload: LocalizacaoIn):
         if origem == "voluntario":
             _aprender_voluntario_no_encontro(cur, int(encontro_id), payload.voluntario_id, vol_nome, vol_tel)
 
-        cnx.commit()
-
         if origem == "voluntario":
             try:
                 wa_result = _maybe_send_onboarding_to_whatsapp(cur, int(encontro_id))
-                cnx.commit()
                 _dbg("WHATSAPP/LOCALIZACAO_TRIGGER", wa_result)
             except Exception as e:
                 _log_exc("Erro ao tentar disparar WhatsApp após /localizacao", e)
+
+        cnx.commit()
 
         cur.execute("SELECT created_at FROM localizacoes WHERE id=%s", (loc_id,))
         row_created = cur.fetchone()
@@ -2820,7 +2629,11 @@ def verificar_webhook_meta_whatsapp(
 
 @app.post("/webhook/meta_whatsapp", tags=["whatsapp"])
 async def receber_webhook_meta_whatsapp(request: Request):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
     _dbg("WHATSAPP/WEBHOOK_POST_IN", body)
 
     try:
