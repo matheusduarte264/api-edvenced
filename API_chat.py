@@ -54,34 +54,29 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 # =========================================
 # 🔐 CONFIGURAÇÃO GERAL
 # =========================================
-DEBUG=false
+
 
 # =========================================
 # 🗄️ BANCO DE DADOS (MYSQL)
 # =========================================
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_USER=api_user
-DB_PASSWORD=2710@Majo
-DB_NAME=ray_edvenced_zap
+
 
 # =========================================
 # 📱 WHATSAPP CLOUD API
 # =========================================
-WHATSAPP_ENABLED=true
+
 
 # 🔑 TOKEN PERMANENTE (Meta)
-WHATSAPP_TOKEN=EAAmFbo01VcEBRG1ZCD2OZCeicFEK73F18uJ5sl9ROlLi3fe9JZCpRj8R7EvRRHLZAKMyUWlsfHx9CgBCwF2QaWz59wGzZC8CgC4r12VIQfSiBQyBZCltuGZCb7gUYuv8PllBT1mKZABcEZCdx0sK51u3ylDggMiSr2NMzJ2ZCenHqTrn6nT5vfiNeUgdz4rtRZAlwZDZD
+
 
 
 # 🔄 VERSÃO DA API
 WHATSAPP_API_VERSION=v22.0
 
 # 🔐 TOKEN DE VERIFICAÇÃO DO WEBHOOK
-WHATSAPP_VERIFY_TOKEN=ray_edvenced_webhook_2026
 
 # 🌐 URL PÚBLICA (IMPORTANTE PRA FOTO/LOCALIZAÇÃO)
-PUBLIC_BASE_URL=https://api.edvenced.com.br
+
 # =========================================
 # LONG-POLL VOLUNTÁRIO
 # =========================
@@ -2720,6 +2715,19 @@ async def receber_webhook_meta_whatsapp(request: Request):
     except Exception as e:
         _log_exc("Erro em /webhook/meta_whatsapp", e)
         return {"ok": False, "error": repr(e)}
+
+# TESTE WHATSAPP
+# =========================
+
+@app.get("/teste_template", tags=["whatsapp"])
+def teste_template(numero: str):
+    return __wa_send_template(
+        numero,
+        "Criança",
+        "criança",
+        "Voluntário teste"
+    )
+
 
 
 # =========================
