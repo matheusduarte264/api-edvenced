@@ -122,7 +122,7 @@ def _wa_post(payload: dict):
 
 
 # 🔄 VERSÃO DA API
-WHATSAPP_API_VERSION=v22.0
+
 
 # 🔐 TOKEN DE VERIFICAÇÃO DO WEBHOOK
 
