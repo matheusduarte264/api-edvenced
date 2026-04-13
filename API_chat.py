@@ -22,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import shutil
 import json
 import sys
@@ -49,6 +51,55 @@ WHATSAPP_WABA_ID = os.getenv("WHATSAPP_WABA_ID", "").strip()
 WHATSAPP_API_VERSION = os.getenv("WHATSAPP_API_VERSION", "v22.0").strip()
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "ray_edvenced_webhook_2026").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+
+
+# =========================
+# 🔥 FUNÇÃO INTERNA: ENVIO WHATSAPP (POST)
+# =========================
+def _wa_post(payload: dict):
+    """
+    Envia requisição para API do WhatsApp Cloud (Meta)
+    """
+    import requests
+
+    # 🔒 Validação básica
+    if not WHATSAPP_PHONE_NUMBER_ID:
+        raise HTTPException(status_code=500, detail="WHATSAPP_PHONE_NUMBER_ID não configurado")
+
+    if not WHATSAPP_TOKEN:
+        raise HTTPException(status_code=500, detail="WHATSAPP_TOKEN não configurado")
+
+    # 📡 URL da API da Meta
+    url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+
+    # 📦 Headers
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    # 🚀 Envio da requisição
+    resp = requests.post(url, headers=headers, json=payload, timeout=30)
+
+    # 🔍 Tenta converter resposta
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": resp.text}
+
+    # ❌ Tratamento de erro
+    if not resp.ok:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "erro": "Falha ao enviar mensagem para o WhatsApp",
+                "status_code": resp.status_code,
+                "resposta_meta": data,
+            },
+        )
+
+    # ✅ Retorno sucesso
+    return data
 
 # =========================
 # =========================================
