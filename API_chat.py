@@ -2938,14 +2938,16 @@ async def receber_webhook_meta_whatsapp(request: Request):
 # TESTE WHATSAPP
 # =========================
 
-@app.get("/teste_template", tags=["whatsapp"])
-def teste_template(numero: str):
-    return _wa_send_template(
-        numero,
-        "Criança",
-        "criança",
-        "Voluntário teste"
-    )
+@app.get("/teste_whatsapp_completo")
+def teste_whatsapp_completo():
+    cnx, cur = _open_cursor()
+    try:
+        resp = _maybe_send_onboarding_to_whatsapp(cur, 8)
+        cnx.commit()
+        return resp
+    finally:
+        cur.close()
+        cnx.close()
 
 
 # =========================
