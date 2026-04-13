@@ -1332,6 +1332,60 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         return erro
 
 # =========================
+# QR / SCAN
+# =========================
+@app.get("/qr/scan", response_model=QrScanOut, tags=["qr"])
+def qr_scan(codigo_qr: str = Query(..., min_length=1, max_length=255)):
+    cq = (codigo_qr or "").strip()
+    if not cq:
+        raise HTTPException(400, "codigo_qr inválido.")
+
+    cnx, cur = _open_cursor()
+    try:
+        info = _resolve_pulseira_por_codigo_qr(cur, cq)
+
+        # 1ª leitura: ainda não existe slot -> cria e manda para cadastro
+        if not info:
+            pulseira_id = _ensure_pulseira_qr_slot(cur, cq)
+            cnx.commit()
+            return QrScanOut(
+                ok=True,
+                codigo_qr=cq,
+                proximo_passo="cadastro",
+                login_vinculo=None,
+                pulseira_id=pulseira_id,
+                responsavel_id=None,
+            )
+
+        pulseira_id = int(info["id"])
+        login_vinculo = (info.get("login_vinculo") or "").strip()
+        responsavel_id = info.get("responsavel_id")
+
+        # Se ainda não foi ativada/vinculada -> cadastro
+        if not login_vinculo or not responsavel_id:
+            return QrScanOut(
+                ok=True,
+                codigo_qr=cq,
+                proximo_passo="cadastro",
+                login_vinculo=login_vinculo or None,
+                pulseira_id=pulseira_id,
+                responsavel_id=responsavel_id,
+            )
+
+        # Se já foi ativada -> onboarding
+        return QrScanOut(
+            ok=True,
+            codigo_qr=cq,
+            proximo_passo="onboarding",
+            login_vinculo=login_vinculo,
+            pulseira_id=pulseira_id,
+            responsavel_id=responsavel_id,
+        )
+    finally:
+        cur.close()
+        cnx.close()
+
+# =========================
 # CADASTRO / PRIMEIRA LEITURA
 # =========================
 @app.post("/cadastro/ativar_pulseira", tags=["cadastro_usuario"])
