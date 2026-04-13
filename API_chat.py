@@ -2886,13 +2886,12 @@ async def receber_webhook_meta_whatsapp(request: Request):
 
 @app.get("/teste_template", tags=["whatsapp"])
 def teste_template(numero: str):
-    return __wa_send_template(
+    return _wa_send_template(
         numero,
         "Criança",
         "criança",
         "Voluntário teste"
     )
-
 
 
 # =========================
