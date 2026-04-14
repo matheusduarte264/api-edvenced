@@ -205,7 +205,10 @@ def _log_exc(prefix: str, e: Exception):
 # =========================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://edvenced.com.br",
+        "https://www.edvenced.com.br"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
