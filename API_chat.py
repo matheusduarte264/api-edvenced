@@ -54,6 +54,7 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 
 
 # =========================
+# =========================
 # 🔥 FUNÇÃO INTERNA: ENVIO WHATSAPP (POST)
 # =========================
 def _wa_post(payload: dict):
@@ -87,6 +88,11 @@ def _wa_post(payload: dict):
     except Exception:
         data = {"raw": resp.text}
 
+    # 🧪 LOG DE DIAGNÓSTICO
+    print("📤 PAYLOAD WHATSAPP:", json.dumps(payload, ensure_ascii=False), flush=True)
+    print("📥 STATUS META:", resp.status_code, flush=True)
+    print("📥 RESPOSTA META:", json.dumps(data, ensure_ascii=False), flush=True)
+
     # ❌ Tratamento de erro
     if not resp.ok:
         raise HTTPException(
@@ -95,6 +101,7 @@ def _wa_post(payload: dict):
                 "erro": "Falha ao enviar mensagem para o WhatsApp",
                 "status_code": resp.status_code,
                 "resposta_meta": data,
+                "payload_enviado": payload,
             },
         )
 
