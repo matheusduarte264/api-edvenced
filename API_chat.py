@@ -1824,6 +1824,120 @@ def buscar_encontro_pendente(
     finally:
         cur.close()
         cnx.close()
+        
+# =========================
+# LOCALIZAÇÃO (FLUXO CORRETO)
+# =========================
+
+@app.post("/localizacao", tags=["localizacao"])
+def salvar_localizacao(payload: LocalizacaoIn):
+    """
+    Recebe localização do voluntário ou usuário
+    e salva vinculando corretamente ao encontro.
+    """
+
+    # 🔎 Resolver login_vinculo (PRINCIPAL)
+    lv = _resolve_login_vinculo_from_payload(
+        payload.login_vinculo,
+        payload.id_pulseira
+    )
+
+    cnx, cur = _open_cursor()
+
+    try:
+        encontro_id = payload.encontro_id
+
+        # 🔥 PRIORIDADE 1 → login_vinculo
+        if not encontro_id and lv:
+            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) \
+                or _resolve_encontro_por_login_vinculo(cur, lv)
+
+        # 🔥 PRIORIDADE 2 → telefone (fallback)
+        if not encontro_id and payload.telefone_vulneravel:
+            tel = _only_digits(payload.telefone_vulneravel)
+            if _is_tel_valido_br(tel):
+                encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") \
+                    or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
+
+        # ❌ Sem encontro → erro
+        if not encontro_id:
+            raise HTTPException(404, "Encontro não encontrado.")
+
+        # 🔎 valida encontro
+        row = _get_encontro_core(cur, int(encontro_id))
+        if not row:
+            raise HTTPException(404, "Encontro não encontrado.")
+
+        login_vinculo_db = row[13]
+
+        # 👤 origem
+        origem = (payload.origem or "").strip().lower()
+
+        voluntario_nome = payload.voluntario_nome
+        voluntario_telefone = _only_digits(payload.voluntario_telefone or "") or None
+
+        # 💾 salva localização
+        cur.execute("""
+            INSERT INTO localizacoes (
+                encontro_id,
+                voluntario_id,
+                voluntario_nome,
+                voluntario_telefone,
+                latitude,
+                longitude,
+                accuracy,
+                ts_client
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            int(encontro_id),
+            payload.voluntario_id,
+            voluntario_nome,
+            voluntario_telefone,
+            float(payload.latitude),
+            float(payload.longitude),
+            payload.accuracy,
+            payload.timestamp
+        ))
+
+        # 🔥 LIBERA FLAG DE LOCALIZAÇÃO
+        cur.execute("""
+            UPDATE encontros
+            SET envio_de_localizacao=1
+            WHERE id=%s
+        """, (int(encontro_id),))
+
+        # 🔥 aprende voluntário (IMPORTANTE PRO WHATSAPP)
+        if origem in ("voluntario", "web"):
+            _aprender_voluntario_no_encontro(
+                cur,
+                int(encontro_id),
+                payload.voluntario_id,
+                voluntario_nome,
+                voluntario_telefone
+            )
+
+        cnx.commit()
+
+        return {
+            "ok": True,
+            "encontro_id": int(encontro_id),
+            "login_vinculo": login_vinculo_db,
+            "latitude": payload.latitude,
+            "longitude": payload.longitude
+        }
+
+    except HTTPException:
+        cnx.rollback()
+        raise
+    except Exception as e:
+        cnx.rollback()
+        _log_exc("Erro em /localizacao", e)
+        raise HTTPException(500, "Falha ao salvar localização.")
+    finally:
+        cur.close()
+        cnx.close()
+
 
 
 # =========================
