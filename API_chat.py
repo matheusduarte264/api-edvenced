@@ -2203,7 +2203,6 @@ async def enviar_audio(
     id_pulseira: Optional[str] = Form(default=None),
     audio: UploadFile = File(...)
 ):
-
     cnx, cur = _open_cursor()
     try:
         origem_lc = _origem_chat_normalizada(origem)
@@ -2230,7 +2229,9 @@ async def enviar_audio(
         login_vinculo_db = row[13]
         telefone_alvo_final = row[16] or None
 
-        nome = (nome_origem or "").strip() or ("Voluntário" if origem_lc == "voluntario" else "Usuário")
+        nome = (nome_origem or "").strip() or (
+            "Voluntário" if origem_lc == "voluntario" else "Usuário"
+        )
         tel_origem = _only_digits(telefone_origem or "") or None
 
         filename = _unique_audio_name(audio.filename or "audio.webm")
@@ -2239,32 +2240,41 @@ async def enviar_audio(
         with open(path, "wb") as f:
             shutil.copyfileobj(audio.file, f)
 
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO mensagens
-            (encontro_id, tipo, arquivo_audio, telefone_origem, nome_origem,
-             telefone_alvo, status, pendente_para, remetente_tipo)
+              (encontro_id, tipo, arquivo_audio, telefone_origem, nome_origem,
+               telefone_alvo, status, pendente_para, remetente_tipo)
             VALUES
-            (%s, 'audio', %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            int(encontro_id),
-            filename,
-            tel_origem,
-            nome,
-            telefone_alvo_final,
-            "entregue" if origem_lc == "voluntario" else "pendente",
-            None if origem_lc == "voluntario" else "voluntario",
-            origem_lc
-        ))
+              (%s, 'audio', %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                int(encontro_id),
+                filename,
+                tel_origem,
+                nome,
+                telefone_alvo_final,
+                "entregue" if origem_lc == "voluntario" else "pendente",
+                None if origem_lc == "voluntario" else "voluntario",
+                origem_lc,
+            ),
+        )
 
         msg_id = int(cur.lastrowid)
 
         if origem_lc == "voluntario":
-            _aprender_voluntario_no_encontro(cur, int(encontro_id), None, nome, tel_origem)
+            _aprender_voluntario_no_encontro(
+                cur,
+                int(encontro_id),
+                None,
+                nome,
+                tel_origem,
+            )
 
             wa_result = _forward_volunteer_audio_to_whatsapp(
                 cur,
                 int(encontro_id),
-                filename
+                filename,
             )
         else:
             wa_result = None
@@ -2281,7 +2291,7 @@ async def enviar_audio(
             "audio_url": f"/media/audios/{filename}",
             "login_vinculo": login_vinculo_db,
             "whatsapp": wa_result,
-            "pendente_para": None if origem_lc == "voluntario" else "voluntario"
+            "pendente_para": None if origem_lc == "voluntario" else "voluntario",
         }
 
     except HTTPException:
@@ -2296,7 +2306,7 @@ async def enviar_audio(
     finally:
         try:
             await audio.close()
-        except:
+        except Exception:
             pass
 
         cur.close()
