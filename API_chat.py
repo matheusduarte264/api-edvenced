@@ -2239,11 +2239,7 @@ async def enviar_audio(
 
     cnx, cur = _open_cursor()
     try:
-        origem_lc = (origem or "voluntario").strip().lower()
-
-        if origem_lc not in ("voluntario", "app"):
-            raise HTTPException(400, "origem inválida.")
-
+         origem_lc = _origem_chat_normalizada(origem)
         # 🔗 Resolver vínculo
         lv = _resolve_login_vinculo_from_payload(login_vinculo, id_pulseira)
 
