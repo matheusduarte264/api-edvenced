@@ -1069,14 +1069,21 @@ def _get_ultima_localizacao_para_encontro(cur, encontro_id: int):
 # =================================================================================================================================================================================================================
 # WHATSAPP HELPERS (ajustado)
 # =================================================================================================================================================================================================================
+
+# =========================
+# CONFIG / NOMES DE TEMPLATE
+# =========================
+# ✅ JÁ EXISTIA
 def _wa_template_name() -> str:
     return os.getenv("WHATSAPP_TEMPLATE_NAME", "alerta_de_localizacao").strip()
 
 
+# ✅ JÁ EXISTIA
 def _wa_template_lang() -> str:
     return os.getenv("WHATSAPP_TEMPLATE_LANG", "pt_BR").strip()
 
 
+# ✅ JÁ EXISTIA
 def _wa_is_configured() -> bool:
     return bool(
         WHATSAPP_ENABLED
@@ -1086,6 +1093,26 @@ def _wa_is_configured() -> bool:
     )
 
 
+# =========================
+# ENVIO SIMPLES PARA WHATSAPP
+# =========================
+
+# 🆕 ENTROU AGORA
+# Envia texto simples para o responsável
+def _wa_send_text(to_number: str, texto: str):
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": _to_wa_number(to_number),
+        "type": "text",
+        "text": {
+            "body": texto
+        }
+    }
+    return _wa_post(payload)
+
+
+# ✅ JÁ EXISTIA
+# Envia template aprovado
 def _wa_send_template(to_number: str, nome: str, tipo: str, voluntario: str):
     payload = {
         "messaging_product": "whatsapp",
@@ -1109,6 +1136,8 @@ def _wa_send_template(to_number: str, nome: str, tipo: str, voluntario: str):
     return _wa_post(payload)
 
 
+# ✅ JÁ EXISTIA
+# Envia localização
 def _wa_send_location(to_number: str, latitude: float, longitude: float, nome: str = "Localização do encontro"):
     payload = {
         "messaging_product": "whatsapp",
@@ -1123,6 +1152,8 @@ def _wa_send_location(to_number: str, latitude: float, longitude: float, nome: s
     return _wa_post(payload)
 
 
+# ✅ JÁ EXISTIA
+# Envia imagem por link público
 def _wa_send_image_by_link(to_number: str, image_url: str, caption: Optional[str] = None):
     image_obj = {"link": image_url}
     if caption:
@@ -1137,6 +1168,131 @@ def _wa_send_image_by_link(to_number: str, image_url: str, caption: Optional[str
     return _wa_post(payload)
 
 
+# 🆕 ENTROU AGORA
+# Envia áudio por link público
+def _wa_send_audio_by_link(to_number: str, audio_url: str):
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": _to_wa_number(to_number),
+        "type": "audio",
+        "audio": {
+            "link": audio_url
+        }
+    }
+    return _wa_post(payload)
+
+
+# =========================
+# SUPORTE A ÁUDIO VINDO DA META
+# =========================
+# Essas funções serão usadas no webhook para:
+# 1) pegar o ID do áudio enviado pelo responsável
+# 2) consultar a URL temporária da Meta
+# 3) baixar o binário
+# 4) salvar no servidor
+# 5) depois inserir no chat como mensagem pendente para o voluntário
+
+# 🆕 ENTROU AGORA
+def _wa_get_media_url(media_id: str) -> dict:
+    if not media_id:
+        raise HTTPException(400, "media_id ausente.")
+
+    if not WHATSAPP_TOKEN:
+        raise HTTPException(500, "WHATSAPP_TOKEN não configurado.")
+
+    url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{media_id}"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+    }
+
+    resp = requests.get(url, headers=headers, timeout=30)
+
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": resp.text}
+
+    if not resp.ok:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "erro": "Falha ao consultar mídia na Meta",
+                "status_code": resp.status_code,
+                "resposta_meta": data,
+            },
+        )
+
+    return data
+
+
+# 🆕 ENTROU AGORA
+def _wa_download_media_bytes(media_url: str) -> bytes:
+    if not media_url:
+        raise HTTPException(400, "media_url ausente.")
+
+    if not WHATSAPP_TOKEN:
+        raise HTTPException(500, "WHATSAPP_TOKEN não configurado.")
+
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+    }
+
+    resp = requests.get(media_url, headers=headers, timeout=60)
+
+    if not resp.ok:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "erro": "Falha ao baixar mídia da Meta",
+                "status_code": resp.status_code,
+                "resposta_meta": resp.text,
+            },
+        )
+
+    return resp.content
+
+
+# 🆕 ENTROU AGORA
+# Baixa um áudio que veio do WhatsApp e salva em AUDIOS_DIR
+def _wa_save_incoming_audio_from_meta(media_id: str, original_mime_type: Optional[str] = None) -> str:
+    meta = _wa_get_media_url(media_id)
+    media_url = meta.get("url")
+    if not media_url:
+        raise HTTPException(500, "Meta não retornou URL da mídia.")
+
+    audio_bytes = _wa_download_media_bytes(media_url)
+
+    # escolhe extensão razoável
+    ext = ".ogg"
+    mime = (original_mime_type or meta.get("mime_type") or "").lower()
+
+    if "mpeg" in mime or "mp3" in mime:
+        ext = ".mp3"
+    elif "wav" in mime:
+        ext = ".wav"
+    elif "aac" in mime:
+        ext = ".aac"
+    elif "webm" in mime:
+        ext = ".webm"
+    elif "ogg" in mime:
+        ext = ".ogg"
+    elif "m4a" in mime or "mp4" in mime:
+        ext = ".m4a"
+
+    filename = _unique_audio_name(f"meta_audio{ext}")
+    path = os.path.join(AUDIOS_DIR, filename)
+
+    with open(path, "wb") as f:
+        f.write(audio_bytes)
+
+    return filename
+
+
+# =========================
+# STATUS / RESPOSTA META
+# =========================
+
+# ✅ JÁ EXISTIA
 def _meta_response_ok(resp: Optional[dict]) -> bool:
     """
     A Meta costuma retornar 'messages' em caso de sucesso.
@@ -1144,6 +1300,11 @@ def _meta_response_ok(resp: Optional[dict]) -> bool:
     return bool(resp and isinstance(resp, dict) and resp.get("messages"))
 
 
+# =========================
+# ERRO DE WHATSAPP NO ENCONTRO
+# =========================
+
+# ✅ JÁ EXISTIA
 def _set_whatsapp_error(cur, encontro_id: int, erro_obj):
     try:
         if isinstance(erro_obj, (dict, list)):
@@ -1160,6 +1321,7 @@ def _set_whatsapp_error(cur, encontro_id: int, erro_obj):
         _log_exc("Falha ao gravar whatsapp_ultimo_erro", e)
 
 
+# ✅ JÁ EXISTIA
 def _clear_whatsapp_error(cur, encontro_id: int):
     try:
         cur.execute("""
@@ -1171,6 +1333,14 @@ def _clear_whatsapp_error(cur, encontro_id: int):
         _log_exc("Falha ao limpar whatsapp_ultimo_erro", e)
 
 
+# =========================
+# DISPARO DO PACOTE COMPLETO
+# =========================
+# ✅ JÁ EXISTIA
+# Continua responsável por:
+# 1) template
+# 2) localização
+# 3) foto
 def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     """
     Envia pacote completo ao responsável quando o onboarding estiver completo:
@@ -2937,6 +3107,7 @@ def alterar_status_chat(acao: str = Form(...)):
 # =========================
 # WEBHOOK META / WHATSAPP
 # =========================
+
 @app.get("/webhook/meta_whatsapp", response_class=PlainTextResponse, tags=["whatsapp"])
 def verificar_webhook_meta_whatsapp(
     hub_mode: Optional[str] = Query(None, alias="hub.mode"),
@@ -2957,6 +3128,15 @@ def verificar_webhook_meta_whatsapp(
 
 @app.post("/webhook/meta_whatsapp", tags=["whatsapp"])
 async def receber_webhook_meta_whatsapp(request: Request):
+    """
+    Fluxo:
+    - Recebe mensagens vindas do WhatsApp do responsável
+    - Procura o encontro correspondente
+    - Se for texto: grava como mensagem pendente para o voluntário
+    - Se for áudio: baixa da Meta, salva no servidor e grava como pendente
+    - Dispara _notify_poll(...) para o chat receber
+    """
+
     try:
         body = await request.json()
     except Exception:
@@ -2980,16 +3160,36 @@ async def receber_webhook_meta_whatsapp(request: Request):
                 for msg in messages:
                     wa_from = _only_digits(msg.get("from") or "")
                     msg_type = (msg.get("type") or "").strip().lower()
-                    texto = None
 
+                    # =========================
+                    # TEXTO (já existia)
+                    # =========================
+                    texto = None
                     if msg_type == "text":
                         texto = (((msg.get("text") or {}).get("body")) or "").strip()
 
-                    if not texto:
+                    # =========================
+                    # ÁUDIO (entrou agora)
+                    # =========================
+                    audio_id = None
+                    audio_mime_type = None
+                    if msg_type == "audio":
+                        audio_obj = msg.get("audio") or {}
+                        audio_id = (audio_obj.get("id") or "").strip()
+                        audio_mime_type = (audio_obj.get("mime_type") or "").strip()
+
+                    # Se não for texto nem áudio útil, ignora
+                    if msg_type == "text" and not texto:
+                        continue
+
+                    if msg_type == "audio" and not audio_id:
                         continue
 
                     cnx, cur = _open_cursor()
                     try:
+                        # =========================
+                        # Resolver encontro pelo telefone do responsável
+                        # =========================
                         cur.execute("""
                             SELECT
                                 e.id,
@@ -3026,21 +3226,52 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         login_vinculo = row[1]
                         telefone_legacy = row[2]
 
-                        cur.execute("""
-                            INSERT INTO mensagens
-                              (encontro_id, tipo, conteudo_texto, telefone_origem, nome_origem,
-                               telefone_alvo, status, pendente_para, remetente_tipo)
-                            VALUES
-                              (%s, 'texto', %s, %s, %s, %s, 'pendente', 'voluntario', 'whatsapp')
-                        """, (
-                            encontro_id,
-                            texto,
-                            _only_digits(wa_from),
-                            wa_from_name or "Responsável",
-                            telefone_legacy
-                        ))
-                        cnx.commit()
-                        _notify_poll("voluntario", encontro_id, login_vinculo)
+                        # =========================
+                        # Caso 1: TEXTO
+                        # =========================
+                        if msg_type == "text":
+                            cur.execute("""
+                                INSERT INTO mensagens
+                                  (encontro_id, tipo, conteudo_texto, telefone_origem, nome_origem,
+                                   telefone_alvo, status, pendente_para, remetente_tipo)
+                                VALUES
+                                  (%s, 'texto', %s, %s, %s, %s, 'pendente', 'voluntario', 'whatsapp')
+                            """, (
+                                encontro_id,
+                                texto,
+                                _only_digits(wa_from),
+                                wa_from_name or "Responsável",
+                                telefone_legacy
+                            ))
+                            cnx.commit()
+                            _notify_poll("voluntario", encontro_id, login_vinculo)
+                            continue
+
+                        # =========================
+                        # Caso 2: ÁUDIO (novo)
+                        # =========================
+                        if msg_type == "audio":
+                            filename = _wa_save_incoming_audio_from_meta(
+                                media_id=audio_id,
+                                original_mime_type=audio_mime_type
+                            )
+
+                            cur.execute("""
+                                INSERT INTO mensagens
+                                  (encontro_id, tipo, arquivo_audio, telefone_origem, nome_origem,
+                                   telefone_alvo, status, pendente_para, remetente_tipo)
+                                VALUES
+                                  (%s, 'audio', %s, %s, %s, %s, 'pendente', 'voluntario', 'whatsapp')
+                            """, (
+                                encontro_id,
+                                filename,
+                                _only_digits(wa_from),
+                                wa_from_name or "Responsável",
+                                telefone_legacy
+                            ))
+                            cnx.commit()
+                            _notify_poll("voluntario", encontro_id, login_vinculo)
+                            continue
 
                     except Exception as e:
                         cnx.rollback()
@@ -3050,6 +3281,7 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         cnx.close()
 
         return {"ok": True}
+
     except Exception as e:
         _log_exc("Erro em /webhook/meta_whatsapp", e)
         return {"ok": False, "error": repr(e)}
