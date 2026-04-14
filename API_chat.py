@@ -357,6 +357,18 @@ def _norm_destino(s: Optional[str]) -> Optional[str]:
     if v == "app":
         return "app"
     return None
+    
+def _origem_chat_normalizada(origem: Optional[str]) -> str:
+    v = (origem or "voluntario").strip().lower()
+
+    if v == "web":
+        return "voluntario"
+
+    if v in ("voluntario", "app"):
+        return v
+
+    raise HTTPException(400, "origem inválida. Use 'voluntario', 'web' ou 'app'.")
+    
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -2009,9 +2021,7 @@ def enviar_texto(payload: MensagemTextoIn):
     if not texto:
         raise HTTPException(400, "texto vazio.")
 
-    origem = (payload.origem or "voluntario").strip().lower()
-    if origem not in ("voluntario", "app"):
-        raise HTTPException(400, "origem inválida. Use 'voluntario' ou 'app'.")
+    origem = _origem_chat_normalizada(payload.origem)
 
     tel_origem = _only_digits(payload.telefone_origem or payload.voluntario_telefone or "") or None
     nome_origem = (payload.nome_origem or "").strip() or ("Voluntário" if origem == "voluntario" else "Usuário")
@@ -2128,9 +2138,7 @@ async def enviar_audio(
 ):
     cnx, cur = _open_cursor()
     try:
-        origem_lc = (origem or "voluntario").strip().lower()
-        if origem_lc not in ("voluntario", "app"):
-            raise HTTPException(400, "origem inválida. Use 'voluntario' ou 'app'.")
+        origem_lc = _origem_chat_normalizada(origem)
 
         lv = _resolve_login_vinculo_from_payload(login_vinculo, id_pulseira)
         if not encontro_id and lv:
