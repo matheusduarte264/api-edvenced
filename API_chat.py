@@ -101,110 +101,6 @@ def _wa_post(payload: dict):
     # ✅ Retorno sucesso
     return data
 
-
-# =========================
-# 🔥 NOVAS FUNÇÕES (COLAR AQUI)
-# =========================
-
-def _wa_send_text(to_number: str, texto: str):
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": _to_wa_number(to_number),
-        "type": "text",
-        "text": {
-            "body": texto
-        }
-    }
-    return _wa_post(payload)
-
-
-def _wa_send_audio_by_link(to_number: str, audio_url: str):
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": _to_wa_number(to_number),
-        "type": "audio",
-        "audio": {
-            "link": audio_url
-        }
-    }
-    return _wa_post(payload)
-
-
-# =========================================
-# TEXTO → WHATSAPP
-# =========================================
-def _forward_volunteer_text_to_whatsapp(cur, encontro_id: int, texto: str):
-    try:
-        cur.execute("""
-            SELECT COALESCE(r.whatsapp, r.telefone)
-            FROM encontros e
-            LEFT JOIN responsaveis r ON r.id = e.responsavel_id
-            WHERE e.id=%s
-            LIMIT 1
-        """, (int(encontro_id),))
-
-        row = cur.fetchone()
-
-        if not row:
-            return {"ok": False, "erro": "encontro_nao_encontrado"}
-
-        telefone_resp = row[0]
-
-        if not telefone_resp:
-            return {"ok": False, "erro": "responsavel_sem_whatsapp"}
-
-        resp = _wa_send_text(telefone_resp, texto)
-
-        return {
-            "ok": True,
-            "meta": resp
-        }
-
-    except Exception as e:
-        _log_exc("Erro ao encaminhar TEXTO para WhatsApp", e)
-        return {"ok": False, "erro": repr(e)}
-
-
-# =========================================
-# AUDIO → WHATSAPP
-# =========================================
-def _forward_volunteer_audio_to_whatsapp(cur, encontro_id: int, filename: str):
-    try:
-        cur.execute("""
-            SELECT COALESCE(r.whatsapp, r.telefone)
-            FROM encontros e
-            LEFT JOIN responsaveis r ON r.id = e.responsavel_id
-            WHERE e.id=%s
-            LIMIT 1
-        """, (int(encontro_id),))
-
-        row = cur.fetchone()
-
-        if not row:
-            return {"ok": False, "erro": "encontro_nao_encontrado"}
-
-        telefone_resp = row[0]
-
-        if not telefone_resp:
-            return {"ok": False, "erro": "responsavel_sem_whatsapp"}
-
-        if not PUBLIC_BASE_URL:
-            return {"ok": False, "erro": "PUBLIC_BASE_URL_nao_configurada"}
-
-        audio_url = f"{PUBLIC_BASE_URL}/media/audios/{filename}"
-
-        resp = _wa_send_audio_by_link(telefone_resp, audio_url)
-
-        return {
-            "ok": True,
-            "meta": resp,
-            "audio_url": audio_url
-        }
-
-    except Exception as e:
-        _log_exc("Erro ao encaminhar AUDIO para WhatsApp", e)
-        return {"ok": False, "erro": repr(e)}
-
 # =========================
 # =========================================
 # 🔐 CONFIGURAÇÃO GERAL
@@ -398,18 +294,6 @@ def _norm_destino(s: Optional[str]) -> Optional[str]:
     if v == "app":
         return "app"
     return None
-    
-def _origem_chat_normalizada(origem: Optional[str]) -> str:
-    v = (origem or "voluntario").strip().lower()
-
-    if v == "web":
-        return "voluntario"
-
-    if v in ("voluntario", "app"):
-        return v
-
-    raise HTTPException(400, "origem inválida. Use 'voluntario', 'web' ou 'app'.")
-    
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -1957,21 +1841,19 @@ async def receber_foto(
     id_pulseira: Optional[str] = Form(default=None),
 ):
     cnx, cur = _open_cursor()
-    cnx, cur = _open_cursor()
     try:
-        origem_lc = _origem_chat_normalizada(origem)
+        origem_lc = (origem or "voluntario").strip().lower()
+        if origem_lc not in ("voluntario", "app"):
+            raise HTTPException(400, "origem inválida. Use 'voluntario' ou 'app'.")
 
         lv = _resolve_login_vinculo_from_payload(login_vinculo, id_pulseira)
-
         if not encontro_id and lv:
-            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) \
-                or _resolve_encontro_por_login_vinculo(cur, lv)
+            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) or _resolve_encontro_por_login_vinculo(cur, lv)
 
         if not encontro_id and telefone_alvo:
             tel = _only_digits(telefone_alvo)
             if _is_tel_valido_br(tel):
-                encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") \
-                    or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
+                encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
 
         if not encontro_id:
             raise HTTPException(404, "Encontro não encontrado.")
@@ -2055,6 +1937,7 @@ async def receber_foto(
         cnx.close()
 
 
+
 # =========================
 # MENSAGENS
 # =========================
@@ -2067,17 +1950,11 @@ def enviar_texto(payload: MensagemTextoIn):
 
     origem = _origem_chat_normalizada(payload.origem)
 
-    tel_origem = _only_digits(
-        payload.telefone_origem or payload.voluntario_telefone or ""
-    ) or None
+    tel_origem = _only_digits(payload.telefone_origem or payload.voluntario_telefone or "") or None
     nome_origem = (payload.nome_origem or "").strip() or (
         "Voluntário" if origem == "voluntario" else "Usuário"
     )
-
-    lv = _resolve_login_vinculo_from_payload(
-        payload.login_vinculo,
-        payload.id_pulseira,
-    )
+    lv = _resolve_login_vinculo_from_payload(payload.login_vinculo, payload.id_pulseira)
 
     cnx, cur = _open_cursor()
     try:
@@ -2090,13 +1967,8 @@ def enviar_texto(payload: MensagemTextoIn):
         if not encontro_id and payload.telefone_alvo:
             tel = _only_digits(payload.telefone_alvo)
             if _is_tel_valido_br(tel):
-                encontro_id = _resolve_encontro_pendente_por_login_vinculo(
-                    cur,
-                    f"legacy_{tel}",
-                ) or _resolve_encontro_por_login_vinculo(
-                    cur,
-                    f"legacy_{tel}",
-                )
+                encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") \
+                    or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
 
         if not encontro_id:
             raise HTTPException(404, "Encontro não encontrado.")
@@ -2106,29 +1978,22 @@ def enviar_texto(payload: MensagemTextoIn):
             raise HTTPException(404, "Encontro não encontrado.")
 
         login_vinculo_db = row[13]
-        telefone_alvo_final = row[16] or None
+        telefone_alvo_final = row[17] or None
 
-        # =========================
-        # VOLUNTÁRIO → WHATSAPP
-        # =========================
         if origem == "voluntario":
-            cur.execute(
-                """
+            cur.execute("""
                 INSERT INTO mensagens
                   (encontro_id, tipo, conteudo_texto, telefone_origem, nome_origem,
                    telefone_alvo, status, pendente_para, remetente_tipo)
                 VALUES
                   (%s, 'texto', %s, %s, %s, %s, 'entregue', NULL, 'voluntario')
-                """,
-                (
-                    int(encontro_id),
-                    texto,
-                    tel_origem,
-                    nome_origem,
-                    telefone_alvo_final,
-                ),
-            )
-
+            """, (
+                int(encontro_id),
+                texto,
+                tel_origem,
+                nome_origem,
+                telefone_alvo_final
+            ))
             msg_id = int(cur.lastrowid)
 
             _aprender_voluntario_no_encontro(
@@ -2136,27 +2001,24 @@ def enviar_texto(payload: MensagemTextoIn):
                 int(encontro_id),
                 None,
                 nome_origem,
-                tel_origem,
+                tel_origem
             )
 
             wa_result = _forward_volunteer_text_to_whatsapp(
                 cur,
                 int(encontro_id),
-                texto,
+                texto
             )
 
             if not wa_result.get("ok"):
-                cur.execute(
-                    """
+                cur.execute("""
                     UPDATE encontros
                     SET whatsapp_ultimo_erro=%s
                     WHERE id=%s
-                    """,
-                    (
-                        json.dumps(wa_result, ensure_ascii=False),
-                        int(encontro_id),
-                    ),
-                )
+                """, (
+                    json.dumps(wa_result, ensure_ascii=False),
+                    int(encontro_id)
+                ))
 
             cnx.commit()
 
@@ -2168,26 +2030,19 @@ def enviar_texto(payload: MensagemTextoIn):
                 "whatsapp": wa_result,
             }
 
-        # =========================
-        # APP → VOLUNTÁRIO
-        # =========================
-        cur.execute(
-            """
+        cur.execute("""
             INSERT INTO mensagens
               (encontro_id, tipo, conteudo_texto, telefone_origem, nome_origem,
                telefone_alvo, status, pendente_para, remetente_tipo)
             VALUES
               (%s, 'texto', %s, %s, %s, %s, 'pendente', 'voluntario', 'app')
-            """,
-            (
-                int(encontro_id),
-                texto,
-                tel_origem,
-                nome_origem,
-                telefone_alvo_final,
-            ),
-        )
-
+        """, (
+            int(encontro_id),
+            texto,
+            tel_origem,
+            nome_origem,
+            telefone_alvo_final
+        ))
         msg_id = int(cur.lastrowid)
 
         cnx.commit()
@@ -2205,20 +2060,30 @@ def enviar_texto(payload: MensagemTextoIn):
     except HTTPException:
         cnx.rollback()
         raise
-
     except Exception as e:
         cnx.rollback()
         _log_exc("Erro em /mensagem/texto", e)
         raise HTTPException(500, "Falha ao enviar mensagem.")
-
     finally:
         cur.close()
         cnx.close()
 
 
-# =========================
-# AUDIO (ÚNICO - SEM DUPLICADO)
-# =========================
+@app.post("/mensagem/enviar", tags=["mensagens"])
+def enviar_texto_compat(payload: Dict[str, Any] = Body(...)):
+    model = MensagemTextoIn(
+        telefone_alvo=payload.get("telefone_alvo") or payload.get("telefone_vulneravel") or payload.get("telefone"),
+        telefone_origem=payload.get("telefone_origem") or payload.get("voluntario_telefone"),
+        nome_origem=payload.get("nome_origem") or payload.get("nome"),
+        texto=str(payload.get("texto") or payload.get("mensagem") or payload.get("msg") or "").strip(),
+        encontro_id=payload.get("encontro_id") or payload.get("encontroId"),
+        origem=(payload.get("origem") or "voluntario"),
+        voluntario_telefone=payload.get("voluntario_telefone"),
+        login_vinculo=payload.get("login_vinculo") or payload.get("id_pulseira"),
+        id_pulseira=payload.get("id_pulseira") or payload.get("login_vinculo"),
+    )
+    return enviar_texto(model)
+
 
 @app.post("/mensagem/audio", tags=["mensagens"])
 async def enviar_audio(
@@ -2229,16 +2094,13 @@ async def enviar_audio(
     origem: Optional[str] = Form(default="voluntario"),
     login_vinculo: Optional[str] = Form(default=None),
     id_pulseira: Optional[str] = Form(default=None),
-    audio: UploadFile = File(...),
+    audio: UploadFile = File(...)
 ):
     cnx, cur = _open_cursor()
     try:
         origem_lc = _origem_chat_normalizada(origem)
 
-        lv = _resolve_login_vinculo_from_payload(
-            login_vinculo,
-            id_pulseira,
-        )
+        lv = _resolve_login_vinculo_from_payload(login_vinculo, id_pulseira)
 
         if not encontro_id and lv:
             encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) \
@@ -2247,13 +2109,8 @@ async def enviar_audio(
         if not encontro_id and telefone_alvo:
             tel = _only_digits(telefone_alvo)
             if _is_tel_valido_br(tel):
-                encontro_id = _resolve_encontro_pendente_por_login_vinculo(
-                    cur,
-                    f"legacy_{tel}",
-                ) or _resolve_encontro_por_login_vinculo(
-                    cur,
-                    f"legacy_{tel}",
-                )
+                encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") \
+                    or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
 
         if not encontro_id:
             raise HTTPException(404, "Encontro não encontrado.")
@@ -2263,7 +2120,7 @@ async def enviar_audio(
             raise HTTPException(404, "Encontro não encontrado.")
 
         login_vinculo_db = row[13]
-        telefone_alvo_final = row[16] or None
+        telefone_alvo_final = row[17] or None
 
         nome = (nome_origem or "").strip() or (
             "Voluntário" if origem_lc == "voluntario" else "Usuário"
@@ -2276,26 +2133,22 @@ async def enviar_audio(
         with open(path, "wb") as f:
             shutil.copyfileobj(audio.file, f)
 
-        cur.execute(
-            """
+        cur.execute("""
             INSERT INTO mensagens
               (encontro_id, tipo, arquivo_audio, telefone_origem, nome_origem,
                telefone_alvo, status, pendente_para, remetente_tipo)
             VALUES
               (%s, 'audio', %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                int(encontro_id),
-                filename,
-                tel_origem,
-                nome,
-                telefone_alvo_final,
-                "entregue" if origem_lc == "voluntario" else "pendente",
-                None if origem_lc == "voluntario" else "voluntario",
-                origem_lc,
-            ),
-        )
-
+        """, (
+            int(encontro_id),
+            filename,
+            tel_origem,
+            nome,
+            telefone_alvo_final,
+            "entregue" if origem_lc == "voluntario" else "pendente",
+            None if origem_lc == "voluntario" else "voluntario",
+            origem_lc
+        ))
         msg_id = int(cur.lastrowid)
 
         if origem_lc == "voluntario":
@@ -2304,14 +2157,24 @@ async def enviar_audio(
                 int(encontro_id),
                 None,
                 nome,
-                tel_origem,
+                tel_origem
             )
 
             wa_result = _forward_volunteer_audio_to_whatsapp(
                 cur,
                 int(encontro_id),
-                filename,
+                filename
             )
+
+            if not wa_result.get("ok"):
+                cur.execute("""
+                    UPDATE encontros
+                    SET whatsapp_ultimo_erro=%s
+                    WHERE id=%s
+                """, (
+                    json.dumps(wa_result, ensure_ascii=False),
+                    int(encontro_id)
+                ))
         else:
             wa_result = None
 
@@ -2333,25 +2196,18 @@ async def enviar_audio(
     except HTTPException:
         cnx.rollback()
         raise
-
     except Exception as e:
         cnx.rollback()
         _log_exc("Erro em /mensagem/audio", e)
         raise HTTPException(500, "Falha ao enviar áudio.")
-
     finally:
         try:
-            await audio.close()
+            if audio and not audio.file.closed:
+                await audio.close()
         except Exception:
             pass
-
         cur.close()
         cnx.close()
-
-
-# =========================
-# 🔚 FIM MENSAGEM DE ÁUDIO
-# =========================
 
 
 @app.get("/mensagem/pending", tags=["mensagens"])
@@ -2375,14 +2231,17 @@ def buscar_mensagem_pendente(
     cnx, cur = _open_cursor()
     try:
         resolved_encontro_id = encontro_id
+
         if not resolved_encontro_id and lv:
-            resolved_encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) or _resolve_encontro_por_login_vinculo(cur, lv)
+            resolved_encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) \
+                or _resolve_encontro_por_login_vinculo(cur, lv)
 
         if not resolved_encontro_id:
             tel_in = telefone_alvo or telefone
             tel = _only_digits(tel_in or "")
             if _is_tel_valido_br(tel):
-                resolved_encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
+                resolved_encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") \
+                    or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
 
         if not resolved_encontro_id:
             return {"has_msg": False, "error": "encontro_not_found"}
@@ -2402,7 +2261,11 @@ def buscar_mensagem_pendente(
                   AND id > %s
                 ORDER BY id ASC
                 LIMIT 1
-            """, (int(resolved_encontro_id), destino_lc or "voluntario", int(last_id or 0)))
+            """, (
+                int(resolved_encontro_id),
+                destino_lc or "voluntario",
+                int(last_id or 0)
+            ))
             return cur.fetchone()
 
         if not wait_seconds or wait_seconds <= 0:
@@ -2456,7 +2319,12 @@ def buscar_mensagem_pendente(
 
             now = time.time()
             if now >= deadline:
-                return {"has_msg": False, "timeout": True, "login_vinculo": login_vinculo_db, "took_ms": int((time.time() - t0) * 1000)}
+                return {
+                    "has_msg": False,
+                    "timeout": True,
+                    "login_vinculo": login_vinculo_db,
+                    "took_ms": int((time.time() - t0) * 1000)
+                }
 
             remaining = max(0.0, deadline - now)
             wait_chunk = min(remaining, max(0.02, float(sleep_ms) / 1000.0))
@@ -2492,10 +2360,18 @@ def ack_mensagem(payload: MensagemAckIn):
         pendente_para = (row[2] or "").strip().lower()
 
         if status_atual != "pendente":
-            return {"ok": True, "updated": 0, "info": "already_not_pendente", "status": status_atual}
+            return {
+                "ok": True,
+                "updated": 0,
+                "info": "already_not_pendente",
+                "status": status_atual
+            }
 
         if pendente_para and ack_por != pendente_para:
-            raise HTTPException(400, f"ack_por inválido. Esperado '{pendente_para}', recebeu '{ack_por}'.")
+            raise HTTPException(
+                400,
+                f"ack_por inválido. Esperado '{pendente_para}', recebeu '{ack_por}'."
+            )
 
         cur.execute("""
             UPDATE mensagens
@@ -2505,7 +2381,9 @@ def ack_mensagem(payload: MensagemAckIn):
             WHERE id=%s AND status='pendente'
         """, (ack_por, payload.id))
         cnx.commit()
+
         return {"ok": True, "updated": cur.rowcount}
+
     except HTTPException:
         cnx.rollback()
         raise
@@ -2516,8 +2394,6 @@ def ack_mensagem(payload: MensagemAckIn):
     finally:
         cur.close()
         cnx.close()
-
-
 # =========================
 # LOCALIZAÇÃO
 # =========================
