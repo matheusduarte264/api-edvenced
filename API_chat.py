@@ -1957,19 +1957,21 @@ async def receber_foto(
     id_pulseira: Optional[str] = Form(default=None),
 ):
     cnx, cur = _open_cursor()
+    cnx, cur = _open_cursor()
     try:
-        origem_lc = (origem or "voluntario").strip().lower()
-        if origem_lc not in ("voluntario", "app"):
-            raise HTTPException(400, "origem inválida. Use 'voluntario' ou 'app'.")
+        origem_lc = _origem_chat_normalizada(origem)
 
         lv = _resolve_login_vinculo_from_payload(login_vinculo, id_pulseira)
+
         if not encontro_id and lv:
-            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) or _resolve_encontro_por_login_vinculo(cur, lv)
+            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) \
+                or _resolve_encontro_por_login_vinculo(cur, lv)
 
         if not encontro_id and telefone_alvo:
             tel = _only_digits(telefone_alvo)
             if _is_tel_valido_br(tel):
-                encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
+                encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") \
+                    or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
 
         if not encontro_id:
             raise HTTPException(404, "Encontro não encontrado.")
