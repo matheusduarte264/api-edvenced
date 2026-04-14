@@ -101,6 +101,69 @@ def _wa_post(payload: dict):
     # ✅ Retorno sucesso
     return data
 
+
+# =========================
+# 🔥 NOVAS FUNÇÕES (COLAR AQUI)
+# =========================
+
+def _wa_send_text(to_number: str, texto: str):
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": _to_wa_number(to_number),
+        "type": "text",
+        "text": {
+            "body": texto
+        }
+    }
+    return _wa_post(payload)
+
+
+def _wa_send_audio_by_link(to_number: str, audio_url: str):
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": _to_wa_number(to_number),
+        "type": "audio",
+        "audio": {
+            "link": audio_url
+        }
+    }
+    return _wa_post(payload)
+
+
+def _forward_volunteer_audio_to_whatsapp(cur, encontro_id: int, filename: str):
+    try:
+        cur.execute("""
+            SELECT COALESCE(r.whatsapp, r.telefone)
+            FROM encontros e
+            LEFT JOIN responsaveis r ON r.id = e.responsavel_id
+            WHERE e.id=%s
+            LIMIT 1
+        """, (int(encontro_id),))
+        row = cur.fetchone()
+
+        if not row:
+            return {"ok": False, "erro": "encontro_nao_encontrado"}
+
+        telefone_resp = row[0]
+        if not telefone_resp:
+            return {"ok": False, "erro": "responsavel_sem_whatsapp"}
+
+        if not PUBLIC_BASE_URL:
+            return {"ok": False, "erro": "PUBLIC_BASE_URL_nao_configurada"}
+
+        audio_url = f"{PUBLIC_BASE_URL}/media/audios/{filename}"
+        resp = _wa_send_audio_by_link(telefone_resp, audio_url)
+
+        return {
+            "ok": True,
+            "meta": resp,
+            "audio_url": audio_url
+        }
+
+    except Exception as e:
+        _log_exc("Erro ao encaminhar AUDIO para WhatsApp", e)
+        return {"ok": False, "erro": repr(e)}
+
 # =========================
 # =========================================
 # 🔐 CONFIGURAÇÃO GERAL
@@ -2145,6 +2208,102 @@ async def enviar_audio(
             pass
         cur.close()
         cnx.close()
+# =========================
+# 🎤 MENSAGEM DE ÁUDIO (CHAT → WHATSAPP)
+# =========================
+@app.post("/mensagem/audio", tags=["mensagens"])
+async def enviar_audio(
+    audio: UploadFile = File(...),
+    encontro_id: Optional[int] = Form(default=None),
+    origem: Optional[str] = Form(default="voluntario"),
+    telefone_origem: Optional[str] = Form(default=None),
+    nome_origem: Optional[str] = Form(default=None),
+    login_vinculo: Optional[str] = Form(default=None),
+    id_pulseira: Optional[str] = Form(default=None),
+):
+    """
+    Fluxo:
+    1) Recebe áudio do chat (voluntário ou app)
+    2) Salva arquivo no servidor
+    3) Salva registro no banco
+    4) Se for voluntário → envia áudio para WhatsApp do responsável
+    """
+
+    cnx, cur = _open_cursor()
+    try:
+        origem_lc = (origem or "voluntario").strip().lower()
+
+        if origem_lc not in ("voluntario", "app"):
+            raise HTTPException(400, "origem inválida.")
+
+        # 🔗 Resolver vínculo
+        lv = _resolve_login_vinculo_from_payload(login_vinculo, id_pulseira)
+
+        if not encontro_id and lv:
+            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) \
+                or _resolve_encontro_por_login_vinculo(cur, lv)
+
+        if not encontro_id:
+            raise HTTPException(404, "Encontro não encontrado.")
+
+        # 💾 Salvar áudio no servidor
+        filename = _unique_audio_name(audio.filename or "audio.webm")
+        path = os.path.join(AUDIOS_DIR, filename)
+
+        with open(path, "wb") as f:
+            shutil.copyfileobj(audio.file, f)
+
+        # 🗄️ Salvar no banco
+        cur.execute("""
+            INSERT INTO mensagens
+            (encontro_id, tipo, arquivo_audio, status, remetente_tipo)
+            VALUES (%s, 'audio', %s, 'entregue', %s)
+        """, (
+            int(encontro_id),
+            filename,
+            origem_lc
+        ))
+
+        msg_id = int(cur.lastrowid)
+
+        # 📲 Enviar para WhatsApp (somente voluntário)
+        wa_result = None
+
+        if origem_lc == "voluntario":
+            wa_result = _forward_volunteer_audio_to_whatsapp(
+                cur,
+                int(encontro_id),
+                filename
+            )
+
+        # 💾 Commit final
+        cnx.commit()
+
+        return {
+            "ok": True,
+            "id": msg_id,
+            "encontro_id": int(encontro_id),
+            "audio_url": f"/media/audios/{filename}",
+            "whatsapp": wa_result
+        }
+
+    except Exception as e:
+        cnx.rollback()
+        _log_exc("Erro em /mensagem/audio", e)
+        raise HTTPException(500, "Erro ao enviar áudio.")
+
+    finally:
+        try:
+            await audio.close()
+        except:
+            pass
+
+        cur.close()
+        cnx.close()
+
+# =========================
+# 🔚 FIM MENSAGEM DE ÁUDIO
+# =========================
 
 
 @app.get("/mensagem/pending", tags=["mensagens"])
