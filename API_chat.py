@@ -130,6 +130,44 @@ def _wa_send_audio_by_link(to_number: str, audio_url: str):
     return _wa_post(payload)
 
 
+# =========================================
+# TEXTO → WHATSAPP
+# =========================================
+def _forward_volunteer_text_to_whatsapp(cur, encontro_id: int, texto: str):
+    try:
+        cur.execute("""
+            SELECT COALESCE(r.whatsapp, r.telefone)
+            FROM encontros e
+            LEFT JOIN responsaveis r ON r.id = e.responsavel_id
+            WHERE e.id=%s
+            LIMIT 1
+        """, (int(encontro_id),))
+
+        row = cur.fetchone()
+
+        if not row:
+            return {"ok": False, "erro": "encontro_nao_encontrado"}
+
+        telefone_resp = row[0]
+
+        if not telefone_resp:
+            return {"ok": False, "erro": "responsavel_sem_whatsapp"}
+
+        resp = _wa_send_text(telefone_resp, texto)
+
+        return {
+            "ok": True,
+            "meta": resp
+        }
+
+    except Exception as e:
+        _log_exc("Erro ao encaminhar TEXTO para WhatsApp", e)
+        return {"ok": False, "erro": repr(e)}
+
+
+# =========================================
+# AUDIO → WHATSAPP
+# =========================================
 def _forward_volunteer_audio_to_whatsapp(cur, encontro_id: int, filename: str):
     try:
         cur.execute("""
@@ -139,12 +177,14 @@ def _forward_volunteer_audio_to_whatsapp(cur, encontro_id: int, filename: str):
             WHERE e.id=%s
             LIMIT 1
         """, (int(encontro_id),))
+
         row = cur.fetchone()
 
         if not row:
             return {"ok": False, "erro": "encontro_nao_encontrado"}
 
         telefone_resp = row[0]
+
         if not telefone_resp:
             return {"ok": False, "erro": "responsavel_sem_whatsapp"}
 
@@ -152,6 +192,7 @@ def _forward_volunteer_audio_to_whatsapp(cur, encontro_id: int, filename: str):
             return {"ok": False, "erro": "PUBLIC_BASE_URL_nao_configurada"}
 
         audio_url = f"{PUBLIC_BASE_URL}/media/audios/{filename}"
+
         resp = _wa_send_audio_by_link(telefone_resp, audio_url)
 
         return {
