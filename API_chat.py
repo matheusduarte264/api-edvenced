@@ -1956,8 +1956,6 @@ def registrar_encontro(payload: EncontroIn):
     if login_vinculo:
         cnx, cur = _open_cursor()
         try:
-            # ✅ AJUSTE: aqui não pode usar _ensure_pulseira(),
-            # porque ela pode ativar/vincular a pulseira antes da hora.
             pulseira_id = _resolve_pulseira_id(cur, login_vinculo)
             if not pulseira_id:
                 raise HTTPException(404, "Pulseira não encontrada para este login_vinculo.")
