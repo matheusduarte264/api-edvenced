@@ -1566,6 +1566,172 @@ def qr_scan(codigo_qr: str = Query(..., min_length=1, max_length=255)):
         cnx.close()
 
 # =========================
+# CHAT APÓS ALERTA INICIAL
+# =========================
+# Este bloco libera o envio de texto/áudio do chat web
+# para o WhatsApp do responsável somente depois que
+# o alerta inicial (template + localização + foto) já foi enviado.
+
+
+def _can_forward_chat_to_whatsapp(cur, encontro_id: int) -> bool:
+    """
+    Só permite encaminhar texto/áudio ao WhatsApp
+    depois que o pacote inicial do onboarding já foi enviado.
+    """
+    cur.execute("""
+        SELECT onboarding_whatsapp_enviado
+        FROM encontros
+        WHERE id=%s
+        LIMIT 1
+    """, (int(encontro_id),))
+    row = cur.fetchone()
+    return bool(row and int(row[0] or 0) == 1)
+
+
+# =========================
+# CHAT -> WHATSAPP (HELPERS)
+# =========================
+def _build_whatsapp_text_from_volunteer(nome_origem: Optional[str], texto: str) -> str:
+    nome = (nome_origem or "").strip() or "Voluntário"
+    body = (texto or "").strip()
+    return f"💬 Mensagem de {nome}:\n\n{body}"
+
+
+def _build_public_audio_url(filename: str) -> str:
+    if not PUBLIC_BASE_URL:
+        raise HTTPException(500, "PUBLIC_BASE_URL não configurado.")
+    return f"{PUBLIC_BASE_URL}/media/audios/{filename}"
+
+
+def _resolve_responsavel_whatsapp_by_encontro(cur, encontro_id: int) -> str:
+    row = _get_encontro_core(cur, int(encontro_id))
+    if not row:
+        raise HTTPException(404, "Encontro não encontrado.")
+
+    responsavel_whatsapp = row[17]  # COALESCE(r.whatsapp, r.telefone)
+    if not responsavel_whatsapp:
+        raise HTTPException(400, "WhatsApp do responsável não encontrado.")
+
+    return responsavel_whatsapp
+
+
+# =========================
+# CHAT -> WHATSAPP (TEXTO)
+# =========================
+def _forward_volunteer_text_to_whatsapp(
+    cur,
+    encontro_id: int,
+    texto: str,
+    nome_origem: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Envia TEXTO do voluntário/chat web para o WhatsApp do responsável.
+    """
+    try:
+        if not _wa_is_configured():
+            return {"ok": False, "erro": "whatsapp_not_configured"}
+
+        if not _can_forward_chat_to_whatsapp(cur, int(encontro_id)):
+            return {"ok": False, "erro": "aguardando_alerta_inicial"}
+
+        responsavel_whatsapp = _resolve_responsavel_whatsapp_by_encontro(cur, int(encontro_id))
+        mensagem = _build_whatsapp_text_from_volunteer(nome_origem, texto)
+
+        meta_resp = _wa_send_text(
+            to_number=responsavel_whatsapp,
+            texto=mensagem
+        )
+
+        return {
+            "ok": True,
+            "tipo": "texto",
+            "to": _to_wa_number(responsavel_whatsapp),
+            "meta": meta_resp
+        }
+
+    except HTTPException as e:
+        return {
+            "ok": False,
+            "erro": "whatsapp_text_http_exception",
+            "detail": e.detail
+        }
+
+    except Exception as e:
+        _log_exc("Falha em _forward_volunteer_text_to_whatsapp", e)
+        return {
+            "ok": False,
+            "erro": "whatsapp_text_exception",
+            "detail": repr(e)
+        }
+
+
+# =========================
+# CHAT -> WHATSAPP (ÁUDIO)
+# =========================
+def _forward_volunteer_audio_to_whatsapp(
+    cur,
+    encontro_id: int,
+    filename: str
+) -> Dict[str, Any]:
+    """
+    Envia ÁUDIO do voluntário/chat web para o WhatsApp do responsável.
+    O áudio precisa já estar salvo no servidor e acessível por URL pública.
+    """
+    try:
+        if not _wa_is_configured():
+            return {"ok": False, "erro": "whatsapp_not_configured"}
+
+        if not _can_forward_chat_to_whatsapp(cur, int(encontro_id)):
+            return {"ok": False, "erro": "aguardando_alerta_inicial"}
+
+        responsavel_whatsapp = _resolve_responsavel_whatsapp_by_encontro(cur, int(encontro_id))
+        audio_url = _build_public_audio_url(filename)
+
+        meta_resp = _wa_send_audio_by_link(
+            to_number=responsavel_whatsapp,
+            audio_url=audio_url
+        )
+
+        return {
+            "ok": True,
+            "tipo": "audio",
+            "to": _to_wa_number(responsavel_whatsapp),
+            "audio_url": audio_url,
+            "meta": meta_resp
+        }
+
+    except HTTPException as e:
+        return {
+            "ok": False,
+            "erro": "whatsapp_audio_http_exception",
+            "detail": e.detail
+        }
+
+    except Exception as e:
+        _log_exc("Falha em _forward_volunteer_audio_to_whatsapp", e)
+        return {
+            "ok": False,
+            "erro": "whatsapp_audio_exception",
+            "detail": repr(e)
+        }
+
+
+# =========================
+# CHAT -> WHATSAPP (ERROS)
+# =========================
+def _save_whatsapp_error_if_needed(cur, encontro_id: int, wa_result: Optional[dict]):
+    """
+    Salva erro do envio ao WhatsApp no encontro, sem derrubar o restante do fluxo.
+    """
+    if not wa_result:
+        return
+
+    if wa_result.get("ok"):
+        _clear_whatsapp_error(cur, int(encontro_id))
+        return
+
+    _set_whatsapp_error(cur, int(encontro_id), wa_result)
+# =========================
 # CADASTRO / PRIMEIRA LEITURA
 # =========================
 @app.post("/cadastro/ativar_pulseira", tags=["cadastro_usuario"])
@@ -2235,13 +2401,14 @@ async def receber_foto(
 # =========================
 # MENSAGENS
 # =========================
-
-from typing import Optional, Dict, Any
-from fastapi import Body, HTTPException, UploadFile, File, Form, Query
-import os
-import shutil
-import json
-import time
+# Fluxo:
+# 1) chat web envia texto/áudio
+# 2) API resolve encontro pelo login_vinculo / id_pulseira / encontro_id
+# 3) salva mensagem no banco
+# 4) se origem for voluntario/web -> tenta encaminhar para WhatsApp do responsável
+# 5) se origem for app -> deixa pendente para o voluntário
+# 6) long-poll entrega mensagens pendentes ao chat
+# 7) ack marca como entregue
 
 
 def _close_audio_safely(audio_obj):
@@ -2253,15 +2420,17 @@ def _close_audio_safely(audio_obj):
 
 
 def _safe_commit(cnx):
-    try:
-        cnx.commit()
-    except Exception:
-        raise
+    cnx.commit()
 
 
-def _safe_wa_text(cur, encontro_id: int, texto: str) -> Dict[str, Any]:
+def _safe_wa_text(cur, encontro_id: int, texto: str, nome_origem: Optional[str] = None) -> Dict[str, Any]:
     try:
-        return _forward_volunteer_text_to_whatsapp(cur, int(encontro_id), texto)
+        return _forward_volunteer_text_to_whatsapp(
+            cur,
+            int(encontro_id),
+            texto,
+            nome_origem
+        )
     except Exception as e:
         return {
             "ok": False,
@@ -2306,6 +2475,9 @@ def enviar_texto(payload: MensagemTextoIn):
     cnx, cur = _open_cursor()
 
     try:
+        # =========================
+        # Resolver encontro
+        # =========================
         if not encontro_id and lv:
             encontro_id = (
                 _resolve_encontro_pendente_por_login_vinculo(cur, lv)
@@ -2330,6 +2502,9 @@ def enviar_texto(payload: MensagemTextoIn):
         login_vinculo_db = row[13] if len(row) > 13 else lv
         telefone_alvo_final = row[17] if len(row) > 17 else None
 
+        # =========================
+        # Fluxo voluntário/web -> salva e envia para WhatsApp
+        # =========================
         if origem == "voluntario":
             cur.execute("""
                 INSERT INTO mensagens
@@ -2354,17 +2529,13 @@ def enviar_texto(payload: MensagemTextoIn):
                 tel_origem
             )
 
-            wa_result = _safe_wa_text(cur, int(encontro_id), texto)
-
-            if not wa_result.get("ok"):
-                cur.execute("""
-                    UPDATE encontros
-                    SET whatsapp_ultimo_erro=%s
-                    WHERE id=%s
-                """, (
-                    json.dumps(wa_result, ensure_ascii=False),
-                    int(encontro_id)
-                ))
+            wa_result = _safe_wa_text(
+                cur,
+                int(encontro_id),
+                texto,
+                nome_origem
+            )
+            _save_whatsapp_error_if_needed(cur, int(encontro_id), wa_result)
 
             _safe_commit(cnx)
 
@@ -2376,6 +2547,9 @@ def enviar_texto(payload: MensagemTextoIn):
                 "whatsapp": wa_result,
             }
 
+        # =========================
+        # Fluxo app -> deixa pendente para o voluntário
+        # =========================
         cur.execute("""
             INSERT INTO mensagens
               (encontro_id, tipo, conteudo_texto, telefone_origem, nome_origem,
@@ -2454,6 +2628,9 @@ async def enviar_audio(
     cnx, cur = _open_cursor()
 
     try:
+        # =========================
+        # Resolver encontro
+        # =========================
         lv = _resolve_login_vinculo_from_payload(login_vinculo, id_pulseira)
 
         if not encontro_id and lv:
@@ -2485,17 +2662,20 @@ async def enviar_audio(
         )
         tel_origem = _only_digits(telefone_origem or "") or None
 
+        # =========================
+        # Salvar arquivo de áudio
+        # =========================
         os.makedirs(AUDIOS_DIR, exist_ok=True)
 
         filename = _unique_audio_name(audio.filename or "audio.webm")
         path = os.path.join(AUDIOS_DIR, filename)
 
-        try:
-            with open(path, "wb") as f:
-                shutil.copyfileobj(audio.file, f)
-        except Exception as e:
-            raise HTTPException(500, f"Falha ao salvar áudio: {str(e)}")
+        with open(path, "wb") as f:
+            shutil.copyfileobj(audio.file, f)
 
+        # =========================
+        # Salvar mensagem no banco
+        # =========================
         cur.execute("""
             INSERT INTO mensagens
               (encontro_id, tipo, arquivo_audio, telefone_origem, nome_origem,
@@ -2516,6 +2696,9 @@ async def enviar_audio(
 
         wa_result = None
 
+        # =========================
+        # Fluxo voluntário/web -> envia para WhatsApp
+        # =========================
         if origem_lc == "voluntario":
             _aprender_voluntario_no_encontro(
                 cur,
@@ -2526,19 +2709,13 @@ async def enviar_audio(
             )
 
             wa_result = _safe_wa_audio(cur, int(encontro_id), filename)
-
-            if not wa_result.get("ok"):
-                cur.execute("""
-                    UPDATE encontros
-                    SET whatsapp_ultimo_erro=%s
-                    WHERE id=%s
-                """, (
-                    json.dumps(wa_result, ensure_ascii=False),
-                    int(encontro_id)
-                ))
+            _save_whatsapp_error_if_needed(cur, int(encontro_id), wa_result)
 
         _safe_commit(cnx)
 
+        # =========================
+        # Fluxo app -> notifica long-poll do voluntário
+        # =========================
         if origem_lc != "voluntario":
             _notify_poll("voluntario", int(encontro_id), login_vinculo_db)
 
