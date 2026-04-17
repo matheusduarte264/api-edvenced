@@ -3393,14 +3393,14 @@ async def receber_webhook_meta_whatsapp(request: Request):
                     msg_type = (msg.get("type") or "").strip().lower()
 
                     # =========================
-                    # TEXTO (já existia)
+                    # TEXTO
                     # =========================
                     texto = None
                     if msg_type == "text":
                         texto = (((msg.get("text") or {}).get("body")) or "").strip()
 
                     # =========================
-                    # ÁUDIO (entrou agora)
+                    # ÁUDIO
                     # =========================
                     audio_id = None
                     audio_mime_type = None
@@ -3409,7 +3409,7 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         audio_id = (audio_obj.get("id") or "").strip()
                         audio_mime_type = (audio_obj.get("mime_type") or "").strip()
 
-                    # Se não for texto nem áudio útil, ignora
+                    # ignora o que não interessa
                     if msg_type == "text" and not texto:
                         continue
 
@@ -3444,13 +3444,19 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 FROM encontros e
                                 JOIN responsaveis r ON r.id = e.responsavel_id
                                 LEFT JOIN pulseiras_qr p ON p.id = e.pulseira_id
-                                WHERE COALESCE(r.whatsapp, r.telefone)=%s OR r.telefone=%s
+                                WHERE COALESCE(r.whatsapp, r.telefone)=%s
+                                   OR r.telefone=%s
                                 ORDER BY e.id DESC
                                 LIMIT 1
                             """, (_only_digits(wa_from), _only_digits(wa_from)))
                             row = cur.fetchone()
 
                         if not row:
+                            _dbg("WHATSAPP/WEBHOOK_SEM_ENCONTRO", {
+                                "wa_from": wa_from,
+                                "wa_from_name": wa_from_name,
+                                "msg_type": msg_type,
+                            })
                             continue
 
                         encontro_id = int(row[0])
@@ -3479,7 +3485,7 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             continue
 
                         # =========================
-                        # Caso 2: ÁUDIO (novo)
+                        # Caso 2: ÁUDIO
                         # =========================
                         if msg_type == "audio":
                             filename = _wa_save_incoming_audio_from_meta(
