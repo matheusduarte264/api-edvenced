@@ -3339,6 +3339,96 @@ def alterar_status_chat(acao: str = Form(...)):
 # WEBHOOK META / WHATSAPP
 # =========================
 
+def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
+    """
+    Resolve o encontro correto para uma resposta vinda do WhatsApp.
+
+    REGRA:
+    - Usa o telefone apenas para localizar o responsável
+    - Depois pega o encontro MAIS RECENTE e APTO A RESPOSTA:
+        * status = 'pendente'
+        * onboarding_whatsapp_enviado = 1
+    - Retorna também pulseira/login_vinculo/codigo_qr para amarrar a conversa
+    """
+
+    wa_digits = _only_digits(wa_from or "")
+    if not wa_digits:
+        return None
+
+    wa_com_ddi = _to_wa_number(wa_digits)
+
+    candidatos = {wa_digits, wa_com_ddi}
+
+    # se vier com 55, também tenta sem 55
+    if wa_digits.startswith("55") and len(wa_digits) >= 12:
+        candidatos.add(wa_digits[2:])
+
+    if wa_com_ddi.startswith("55") and len(wa_com_ddi) >= 12:
+        candidatos.add(wa_com_ddi[2:])
+
+    candidatos = [c for c in candidatos if c]
+
+    # =========================
+    # 1) LOCALIZAR RESPONSÁVEL
+    # =========================
+    placeholders = ", ".join(["%s"] * len(candidatos))
+
+    sql_resp = f"""
+        SELECT
+            id,
+            telefone,
+            COALESCE(whatsapp, telefone) AS whatsapp_efetivo
+        FROM responsaveis
+        WHERE COALESCE(whatsapp, telefone) IN ({placeholders})
+           OR telefone IN ({placeholders})
+        ORDER BY id DESC
+        LIMIT 1
+    """
+    cur.execute(sql_resp, tuple(candidatos + candidatos))
+    resp = cur.fetchone()
+
+    if not resp:
+        return None
+
+    responsavel_id = int(resp[0])
+    telefone_legacy = resp[1]
+
+    # =========================
+    # 2) PEGAR O ENCONTRO ATIVO MAIS RECENTE
+    # =========================
+    cur.execute("""
+        SELECT
+            e.id,
+            p.login_vinculo,
+            p.codigo_qr,
+            p.id AS pulseira_id,
+            e.status,
+            e.onboarding_whatsapp_enviado
+        FROM encontros e
+        LEFT JOIN pulseiras_qr p ON p.id = e.pulseira_id
+        WHERE e.responsavel_id = %s
+          AND e.status = 'pendente'
+          AND e.onboarding_whatsapp_enviado = 1
+        ORDER BY e.id DESC
+        LIMIT 1
+    """, (responsavel_id,))
+    row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "encontro_id": int(row[0]),
+        "login_vinculo": row[1],
+        "codigo_qr": row[2],
+        "pulseira_id": int(row[3]) if row[3] is not None else None,
+        "telefone_legacy": telefone_legacy,
+        "responsavel_id": responsavel_id,
+        "status": row[4],
+        "onboarding_whatsapp_enviado": int(row[5] or 0),
+    }
+
+
 @app.get("/webhook/meta_whatsapp", response_class=PlainTextResponse, tags=["whatsapp"])
 def verificar_webhook_meta_whatsapp(
     hub_mode: Optional[str] = Query(None, alias="hub.mode"),
@@ -3362,7 +3452,8 @@ async def receber_webhook_meta_whatsapp(request: Request):
     """
     Fluxo:
     - Recebe mensagens vindas do WhatsApp do responsável
-    - Procura o encontro correspondente
+    - Usa o telefone apenas para identificar o responsável
+    - Resolve o encontro ativo mais recente com onboarding já enviado
     - Se for texto: grava como mensagem pendente para o voluntário
     - Se for áudio: baixa da Meta, salva no servidor e grava como pendente
     - Dispara _notify_poll(...) para o chat receber
@@ -3377,12 +3468,20 @@ async def receber_webhook_meta_whatsapp(request: Request):
 
     try:
         entries = body.get("entry", []) or []
+
         for entry in entries:
             changes = entry.get("changes", []) or []
+
             for change in changes:
                 value = change.get("value", {}) or {}
+
                 contacts = value.get("contacts", []) or []
                 messages = value.get("messages", []) or []
+
+                # ignora eventos sem mensagem (ex.: statuses)
+                if not messages:
+                    _dbg("WHATSAPP/WEBHOOK_SEM_MESSAGES", value)
+                    continue
 
                 wa_from_name = None
                 if contacts:
@@ -3392,66 +3491,55 @@ async def receber_webhook_meta_whatsapp(request: Request):
                     wa_from = _only_digits(msg.get("from") or "")
                     msg_type = (msg.get("type") or "").strip().lower()
 
+                    texto = None
+                    audio_id = None
+                    audio_mime_type = None
+
                     # =========================
                     # TEXTO
                     # =========================
-                    texto = None
                     if msg_type == "text":
                         texto = (((msg.get("text") or {}).get("body")) or "").strip()
 
                     # =========================
                     # ÁUDIO
                     # =========================
-                    audio_id = None
-                    audio_mime_type = None
-                    if msg_type == "audio":
+                    elif msg_type == "audio":
                         audio_obj = msg.get("audio") or {}
                         audio_id = (audio_obj.get("id") or "").strip()
                         audio_mime_type = (audio_obj.get("mime_type") or "").strip()
 
                     # ignora o que não interessa
+                    else:
+                        _dbg("WHATSAPP/WEBHOOK_TIPO_IGNORADO", {
+                            "wa_from": wa_from,
+                            "wa_from_name": wa_from_name,
+                            "msg_type": msg_type,
+                        })
+                        continue
+
                     if msg_type == "text" and not texto:
+                        _dbg("WHATSAPP/WEBHOOK_TEXTO_VAZIO", {
+                            "wa_from": wa_from,
+                            "wa_from_name": wa_from_name,
+                        })
                         continue
 
                     if msg_type == "audio" and not audio_id:
+                        _dbg("WHATSAPP/WEBHOOK_AUDIO_SEM_ID", {
+                            "wa_from": wa_from,
+                            "wa_from_name": wa_from_name,
+                        })
                         continue
 
                     cnx, cur = _open_cursor()
                     try:
                         # =========================
-                        # Resolver encontro pelo telefone do responsável
+                        # RESOLVER ENCONTRO ATIVO DO RESPONSÁVEL
                         # =========================
-                        cur.execute("""
-                            SELECT
-                                e.id,
-                                p.login_vinculo,
-                                r.telefone
-                            FROM encontros e
-                            JOIN responsaveis r ON r.id = e.responsavel_id
-                            LEFT JOIN pulseiras_qr p ON p.id = e.pulseira_id
-                            WHERE COALESCE(r.whatsapp, r.telefone)=%s
-                            ORDER BY e.id DESC
-                            LIMIT 1
-                        """, (_to_wa_number(wa_from),))
-                        row = cur.fetchone()
+                        encontro_info = _resolve_encontro_ativo_do_responsavel(cur, wa_from)
 
-                        if not row:
-                            cur.execute("""
-                                SELECT
-                                    e.id,
-                                    p.login_vinculo,
-                                    r.telefone
-                                FROM encontros e
-                                JOIN responsaveis r ON r.id = e.responsavel_id
-                                LEFT JOIN pulseiras_qr p ON p.id = e.pulseira_id
-                                WHERE COALESCE(r.whatsapp, r.telefone)=%s
-                                   OR r.telefone=%s
-                                ORDER BY e.id DESC
-                                LIMIT 1
-                            """, (_only_digits(wa_from), _only_digits(wa_from)))
-                            row = cur.fetchone()
-
-                        if not row:
+                        if not encontro_info:
                             _dbg("WHATSAPP/WEBHOOK_SEM_ENCONTRO", {
                                 "wa_from": wa_from,
                                 "wa_from_name": wa_from_name,
@@ -3459,12 +3547,24 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             })
                             continue
 
-                        encontro_id = int(row[0])
-                        login_vinculo = row[1]
-                        telefone_legacy = row[2]
+                        encontro_id = int(encontro_info["encontro_id"])
+                        login_vinculo = encontro_info["login_vinculo"]
+                        codigo_qr = encontro_info["codigo_qr"]
+                        pulseira_id = encontro_info["pulseira_id"]
+                        telefone_legacy = encontro_info["telefone_legacy"]
+
+                        _dbg("WHATSAPP/WEBHOOK_ENCONTRO_RESOLVIDO", {
+                            "wa_from": wa_from,
+                            "wa_from_name": wa_from_name,
+                            "msg_type": msg_type,
+                            "encontro_id": encontro_id,
+                            "login_vinculo": login_vinculo,
+                            "codigo_qr": codigo_qr,
+                            "pulseira_id": pulseira_id,
+                        })
 
                         # =========================
-                        # Caso 1: TEXTO
+                        # CASO 1: TEXTO
                         # =========================
                         if msg_type == "text":
                             cur.execute("""
@@ -3481,11 +3581,19 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 telefone_legacy
                             ))
                             cnx.commit()
+
+                            _dbg("WHATSAPP/WEBHOOK_TEXTO_SALVO", {
+                                "encontro_id": encontro_id,
+                                "login_vinculo": login_vinculo,
+                                "codigo_qr": codigo_qr,
+                                "texto": texto,
+                            })
+
                             _notify_poll("voluntario", encontro_id, login_vinculo)
                             continue
 
                         # =========================
-                        # Caso 2: ÁUDIO
+                        # CASO 2: ÁUDIO
                         # =========================
                         if msg_type == "audio":
                             filename = _wa_save_incoming_audio_from_meta(
@@ -3507,6 +3615,14 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 telefone_legacy
                             ))
                             cnx.commit()
+
+                            _dbg("WHATSAPP/WEBHOOK_AUDIO_SALVO", {
+                                "encontro_id": encontro_id,
+                                "login_vinculo": login_vinculo,
+                                "codigo_qr": codigo_qr,
+                                "arquivo_audio": filename,
+                            })
+
                             _notify_poll("voluntario", encontro_id, login_vinculo)
                             continue
 
@@ -3523,6 +3639,7 @@ async def receber_webhook_meta_whatsapp(request: Request):
         _log_exc("Erro em /webhook/meta_whatsapp", e)
         return {"ok": False, "error": repr(e)}
 
+# =========================
 # TESTE WHATSAPP
 # =========================
 
