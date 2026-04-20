@@ -3353,6 +3353,11 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
 
     wa_digits = _only_digits(wa_from or "")
     if not wa_digits:
+        # LOG 1:
+        # mostra quando o número veio vazio/inválido
+        _dbg("WHATSAPP/RESOLVE_ENCONTRO/WA_VAZIO", {
+            "wa_from": wa_from
+        })
         return None
 
     wa_com_ddi = _to_wa_number(wa_digits)
@@ -3367,6 +3372,18 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
         candidatos.add(wa_com_ddi[2:])
 
     candidatos = [c for c in candidatos if c]
+
+    # LOG 2:
+    # mostra todas as variações do telefone que serão testadas no banco
+    _dbg("WHATSAPP/RESOLVE_ENCONTRO/CANDIDATOS", {
+        "wa_from_original": wa_from,
+        "wa_digits": wa_digits,
+        "wa_com_ddi": wa_com_ddi,
+        "candidatos": candidatos,
+    })
+
+    if not candidatos:
+        return None
 
     # =========================
     # 1) LOCALIZAR RESPONSÁVEL
@@ -3388,10 +3405,24 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
     resp = cur.fetchone()
 
     if not resp:
+        # LOG 3:
+        # mostra que não encontrou responsável para esse número
+        _dbg("WHATSAPP/RESOLVE_ENCONTRO/RESPONSAVEL_NAO_ENCONTRADO", {
+            "candidatos": candidatos
+        })
         return None
 
     responsavel_id = int(resp[0])
     telefone_legacy = resp[1]
+    whatsapp_efetivo = resp[2]
+
+    # LOG 4:
+    # confirma qual responsável foi encontrado
+    _dbg("WHATSAPP/RESOLVE_ENCONTRO/RESPONSAVEL_OK", {
+        "responsavel_id": responsavel_id,
+        "telefone_legacy": telefone_legacy,
+        "whatsapp_efetivo": whatsapp_efetivo,
+    })
 
     # =========================
     # 2) PEGAR O ENCONTRO ATIVO MAIS RECENTE
@@ -3415,9 +3446,14 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
     row = cur.fetchone()
 
     if not row:
+        # LOG 5:
+        # encontrou o responsável, mas não encontrou encontro apto a resposta
+        _dbg("WHATSAPP/RESOLVE_ENCONTRO/ENCONTRO_ATIVO_NAO_ENCONTRADO", {
+            "responsavel_id": responsavel_id
+        })
         return None
 
-    return {
+    payload = {
         "encontro_id": int(row[0]),
         "login_vinculo": row[1],
         "codigo_qr": row[2],
@@ -3428,6 +3464,11 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
         "onboarding_whatsapp_enviado": int(row[5] or 0),
     }
 
+    # LOG 6:
+    # encontro correto finalmente resolvido
+    _dbg("WHATSAPP/RESOLVE_ENCONTRO/ENCONTRO_OK", payload)
+    return payload
+
 
 @app.get("/webhook/meta_whatsapp", response_class=PlainTextResponse, tags=["whatsapp"])
 def verificar_webhook_meta_whatsapp(
@@ -3435,15 +3476,30 @@ def verificar_webhook_meta_whatsapp(
     hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
     hub_challenge: Optional[str] = Query(None, alias="hub.challenge"),
 ):
+    # LOG 7:
+    # mostra toda tentativa de verificação do webhook pela Meta
     _dbg("WHATSAPP/WEBHOOK_VERIFY_IN", {
         "hub.mode": hub_mode,
         "hub.verify_token": hub_verify_token,
         "hub.challenge": hub_challenge,
+        "verify_token_esperado": WHATSAPP_VERIFY_TOKEN,
     })
 
     if hub_mode == "subscribe" and hub_verify_token == WHATSAPP_VERIFY_TOKEN and hub_challenge:
+        # LOG 8:
+        # webhook validado com sucesso
+        _dbg("WHATSAPP/WEBHOOK_VERIFY_OK", {
+            "hub.challenge": hub_challenge
+        })
         return hub_challenge
 
+    # LOG 9:
+    # token inválido ou parâmetros errados
+    _dbg("WHATSAPP/WEBHOOK_VERIFY_FAIL", {
+        "hub.mode": hub_mode,
+        "hub.verify_token": hub_verify_token,
+        "verify_token_esperado": WHATSAPP_VERIFY_TOKEN,
+    })
     raise HTTPException(status_code=403, detail="token inválido")
 
 
@@ -3459,47 +3515,127 @@ async def receber_webhook_meta_whatsapp(request: Request):
     - Dispara _notify_poll(...) para o chat receber
     """
 
+    raw_body = ""
+    body = {}
+
     try:
-        body = await request.json()
-    except Exception:
+        raw_bytes = await request.body()
+        raw_body = (raw_bytes or b"").decode("utf-8", errors="ignore")
+    except Exception as e:
+        _log_exc("Erro ao ler body bruto do webhook do WhatsApp", e)
+
+    # LOG 10:
+    # este é o log MAIS IMPORTANTE para provar que a Meta bateu no POST
+    _dbg("WHATSAPP/WEBHOOK_POST_RAW", {
+        "content_type": request.headers.get("content-type"),
+        "body_raw": raw_body[:5000] if raw_body else ""
+    })
+
+    try:
+        body = json.loads(raw_body) if raw_body else {}
+    except Exception as e:
+        _log_exc("Erro ao fazer parse JSON do webhook do WhatsApp", e)
         body = {}
 
+    # LOG 11:
+    # corpo já convertido em JSON
     _dbg("WHATSAPP/WEBHOOK_POST_IN", body)
 
     try:
         entries = body.get("entry", []) or []
 
-        for entry in entries:
+        # LOG 12:
+        # quantas entries vieram
+        _dbg("WHATSAPP/WEBHOOK_ENTRIES", {
+            "entries_count": len(entries)
+        })
+
+        for entry_idx, entry in enumerate(entries):
             changes = entry.get("changes", []) or []
 
-            for change in changes:
+            # LOG 13:
+            # visão geral de cada entry
+            _dbg("WHATSAPP/WEBHOOK_ENTRY", {
+                "entry_idx": entry_idx,
+                "changes_count": len(changes),
+                "entry_keys": list((entry or {}).keys()),
+            })
+
+            for change_idx, change in enumerate(changes):
+                field = (change.get("field") or "").strip()
                 value = change.get("value", {}) or {}
 
                 contacts = value.get("contacts", []) or []
                 messages = value.get("messages", []) or []
+                statuses = value.get("statuses", []) or []
 
-                # ignora eventos sem mensagem (ex.: statuses)
+                # LOG 14:
+                # mostra se veio messages, statuses etc
+                _dbg("WHATSAPP/WEBHOOK_CHANGE", {
+                    "entry_idx": entry_idx,
+                    "change_idx": change_idx,
+                    "field": field,
+                    "contacts_count": len(contacts),
+                    "messages_count": len(messages),
+                    "statuses_count": len(statuses),
+                    "value_keys": list((value or {}).keys()),
+                })
+
+                # ignora eventos sem mensagem (ex.: status de entrega/leitura)
                 if not messages:
-                    _dbg("WHATSAPP/WEBHOOK_SEM_MESSAGES", value)
+                    # LOG 15:
+                    # útil para ver que a Meta chamou, mas só mandou status
+                    _dbg("WHATSAPP/WEBHOOK_SEM_MESSAGES", {
+                        "entry_idx": entry_idx,
+                        "change_idx": change_idx,
+                        "field": field,
+                        "statuses": statuses,
+                        "value": value,
+                    })
                     continue
 
                 wa_from_name = None
                 if contacts:
                     wa_from_name = (((contacts[0] or {}).get("profile") or {}).get("name"))
 
-                for msg in messages:
+                for msg_idx, msg in enumerate(messages):
                     wa_from = _only_digits(msg.get("from") or "")
                     msg_type = (msg.get("type") or "").strip().lower()
+                    msg_id = (msg.get("id") or "").strip()
+                    msg_ts = (msg.get("timestamp") or "").strip()
 
                     texto = None
                     audio_id = None
                     audio_mime_type = None
+
+                    # LOG 16:
+                    # mostra a mensagem individual recebida
+                    _dbg("WHATSAPP/WEBHOOK_MSG_IN", {
+                        "entry_idx": entry_idx,
+                        "change_idx": change_idx,
+                        "msg_idx": msg_idx,
+                        "wa_from": wa_from,
+                        "wa_from_name": wa_from_name,
+                        "msg_type": msg_type,
+                        "msg_id": msg_id,
+                        "msg_ts": msg_ts,
+                        "msg_keys": list((msg or {}).keys()),
+                    })
 
                     # =========================
                     # TEXTO
                     # =========================
                     if msg_type == "text":
                         texto = (((msg.get("text") or {}).get("body")) or "").strip()
+
+                        # LOG 17:
+                        # confirma o texto recebido
+                        _dbg("WHATSAPP/WEBHOOK_TEXTO_RECEBIDO", {
+                            "wa_from": wa_from,
+                            "wa_from_name": wa_from_name,
+                            "msg_id": msg_id,
+                            "texto": texto,
+                        })
 
                     # =========================
                     # ÁUDIO
@@ -3509,41 +3645,71 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         audio_id = (audio_obj.get("id") or "").strip()
                         audio_mime_type = (audio_obj.get("mime_type") or "").strip()
 
-                    # ignora o que não interessa
+                        # LOG 18:
+                        # confirma que chegou um áudio e mostra o media_id
+                        _dbg("WHATSAPP/WEBHOOK_AUDIO_RECEBIDO", {
+                            "wa_from": wa_from,
+                            "wa_from_name": wa_from_name,
+                            "msg_id": msg_id,
+                            "audio_id": audio_id,
+                            "audio_mime_type": audio_mime_type,
+                        })
+
+                    # ignora outros tipos
                     else:
+                        # LOG 19:
+                        # se vier imagem, sticker, reaction etc, cai aqui
                         _dbg("WHATSAPP/WEBHOOK_TIPO_IGNORADO", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
                             "msg_type": msg_type,
+                            "msg_id": msg_id,
                         })
                         continue
 
                     if msg_type == "text" and not texto:
+                        # LOG 20:
+                        # mensagem texto veio, mas vazia
                         _dbg("WHATSAPP/WEBHOOK_TEXTO_VAZIO", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
+                            "msg_id": msg_id,
                         })
                         continue
 
                     if msg_type == "audio" and not audio_id:
+                        # LOG 21:
+                        # áudio sem media_id
                         _dbg("WHATSAPP/WEBHOOK_AUDIO_SEM_ID", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
+                            "msg_id": msg_id,
                         })
                         continue
 
                     cnx, cur = _open_cursor()
                     try:
+                        # LOG 22:
+                        # cursor abriu e já vai tentar resolver o encontro
+                        _dbg("WHATSAPP/WEBHOOK_DB_CURSOR_OK", {
+                            "wa_from": wa_from,
+                            "msg_type": msg_type,
+                            "msg_id": msg_id,
+                        })
+
                         # =========================
                         # RESOLVER ENCONTRO ATIVO DO RESPONSÁVEL
                         # =========================
                         encontro_info = _resolve_encontro_ativo_do_responsavel(cur, wa_from)
 
                         if not encontro_info:
+                            # LOG 23:
+                            # chegou na API, mas não achou encontro para essa resposta
                             _dbg("WHATSAPP/WEBHOOK_SEM_ENCONTRO", {
                                 "wa_from": wa_from,
                                 "wa_from_name": wa_from_name,
                                 "msg_type": msg_type,
+                                "msg_id": msg_id,
                             })
                             continue
 
@@ -3553,14 +3719,18 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         pulseira_id = encontro_info["pulseira_id"]
                         telefone_legacy = encontro_info["telefone_legacy"]
 
+                        # LOG 24:
+                        # ponto-chave: encontro foi amarrado corretamente
                         _dbg("WHATSAPP/WEBHOOK_ENCONTRO_RESOLVIDO", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
                             "msg_type": msg_type,
+                            "msg_id": msg_id,
                             "encontro_id": encontro_id,
                             "login_vinculo": login_vinculo,
                             "codigo_qr": codigo_qr,
                             "pulseira_id": pulseira_id,
+                            "telefone_legacy": telefone_legacy,
                         })
 
                         # =========================
@@ -3580,9 +3750,13 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 wa_from_name or "Responsável",
                                 telefone_legacy
                             ))
+                            nova_msg_id = cur.lastrowid
                             cnx.commit()
 
+                            # LOG 25:
+                            # texto salvo no banco
                             _dbg("WHATSAPP/WEBHOOK_TEXTO_SALVO", {
+                                "mensagem_id": nova_msg_id,
                                 "encontro_id": encontro_id,
                                 "login_vinculo": login_vinculo,
                                 "codigo_qr": codigo_qr,
@@ -3590,16 +3764,42 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             })
 
                             _notify_poll("voluntario", encontro_id, login_vinculo)
+
+                            # LOG 26:
+                            # avisa que o chat do voluntário foi notificado
+                            _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
+                                "destino": "voluntario",
+                                "encontro_id": encontro_id,
+                                "login_vinculo": login_vinculo,
+                                "msg_type": "text",
+                                "msg_id": msg_id,
+                            })
                             continue
 
                         # =========================
                         # CASO 2: ÁUDIO
                         # =========================
                         if msg_type == "audio":
+                            # LOG 27:
+                            # começa download do áudio na Meta
+                            _dbg("WHATSAPP/WEBHOOK_AUDIO_BAIXANDO_META", {
+                                "audio_id": audio_id,
+                                "audio_mime_type": audio_mime_type,
+                                "encontro_id": encontro_id,
+                            })
+
                             filename = _wa_save_incoming_audio_from_meta(
                                 media_id=audio_id,
                                 original_mime_type=audio_mime_type
                             )
+
+                            # LOG 28:
+                            # áudio baixado com sucesso
+                            _dbg("WHATSAPP/WEBHOOK_AUDIO_BAIXADO_META", {
+                                "arquivo_audio": filename,
+                                "audio_id": audio_id,
+                                "encontro_id": encontro_id,
+                            })
 
                             cur.execute("""
                                 INSERT INTO mensagens
@@ -3614,9 +3814,13 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 wa_from_name or "Responsável",
                                 telefone_legacy
                             ))
+                            nova_msg_id = cur.lastrowid
                             cnx.commit()
 
+                            # LOG 29:
+                            # áudio salvo no banco
                             _dbg("WHATSAPP/WEBHOOK_AUDIO_SALVO", {
+                                "mensagem_id": nova_msg_id,
                                 "encontro_id": encontro_id,
                                 "login_vinculo": login_vinculo,
                                 "codigo_qr": codigo_qr,
@@ -3624,19 +3828,54 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             })
 
                             _notify_poll("voluntario", encontro_id, login_vinculo)
+
+                            # LOG 30:
+                            # poll disparado para o voluntário
+                            _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
+                                "destino": "voluntario",
+                                "encontro_id": encontro_id,
+                                "login_vinculo": login_vinculo,
+                                "msg_type": "audio",
+                                "msg_id": msg_id,
+                            })
                             continue
 
                     except Exception as e:
                         cnx.rollback()
                         _log_exc("Erro ao processar webhook do WhatsApp", e)
-                    finally:
-                        cur.close()
-                        cnx.close()
 
+                        # LOG 31:
+                        # contexto do erro
+                        _dbg("WHATSAPP/WEBHOOK_PROCESSAMENTO_ERRO_CONTEXTO", {
+                            "wa_from": wa_from,
+                            "wa_from_name": wa_from_name,
+                            "msg_type": msg_type,
+                            "msg_id": msg_id,
+                        })
+                    finally:
+                        try:
+                            cur.close()
+                        except Exception:
+                            pass
+                        try:
+                            cnx.close()
+                        except Exception:
+                            pass
+
+        # LOG 32:
+        # saída final do endpoint
+        _dbg("WHATSAPP/WEBHOOK_POST_OUT", {"ok": True})
         return {"ok": True}
 
     except Exception as e:
         _log_exc("Erro em /webhook/meta_whatsapp", e)
+
+        # LOG 33:
+        # erro final do endpoint
+        _dbg("WHATSAPP/WEBHOOK_POST_OUT", {
+            "ok": False,
+            "error": repr(e)
+        })
         return {"ok": False, "error": repr(e)}
 
 # =========================
