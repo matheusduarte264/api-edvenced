@@ -36,6 +36,7 @@ from mysql.connector import pooling
 from starlette.requests import Request as StarletteRequest
 import threading
 import math
+import subprocess
 
 app = FastAPI(title="API Chat Pulseira Inteligente")
 
