@@ -1745,8 +1745,8 @@ def _forward_volunteer_text_to_whatsapp(
 # =========================
 def _convert_audio_to_whatsapp_ogg(src_filename: str) -> str:
     """
-    Converte o áudio salvo pelo chat (ex: .webm) para .ogg (opus),
-    formato mais seguro para envio ao WhatsApp por link público.
+    Converte o áudio salvo pelo chat para .ogg/opus,
+    preservando compatibilidade com Android e melhorando suporte a iPhone.
     """
     src_path = os.path.join(AUDIOS_DIR, src_filename)
 
@@ -1757,28 +1757,35 @@ def _convert_audio_to_whatsapp_ogg(src_filename: str) -> str:
     out_filename = f"{base}.ogg"
     out_path = os.path.join(AUDIOS_DIR, out_filename)
 
-    # evita reconversão se já existir
-    if os.path.exists(out_path):
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         return out_filename
 
     cmd = [
         "ffmpeg",
         "-y",
         "-i", src_path,
+        "-vn",
+        "-map", "0:a:0",
+        "-ac", "1",
+        "-ar", "48000",
         "-c:a", "libopus",
         "-b:a", "64k",
+        "-application", "voip",
+        "-f", "ogg",
         out_path
     ]
 
     proc = subprocess.run(cmd, capture_output=True, text=True)
 
-    if proc.returncode != 0 or not os.path.exists(out_path):
+    if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) <= 0:
         raise HTTPException(
             status_code=500,
             detail={
                 "erro": "Falha ao converter áudio para formato aceito pelo WhatsApp",
                 "src_filename": src_filename,
+                "cmd": " ".join(cmd),
                 "stderr": (proc.stderr or "")[-3000:],
+                "stdout": (proc.stdout or "")[-1000:],
             },
         )
 
@@ -1792,7 +1799,7 @@ def _forward_volunteer_audio_to_whatsapp(
 ) -> Dict[str, Any]:
     """
     Envia ÁUDIO do voluntário/chat web para o WhatsApp do responsável.
-    Converte o arquivo salvo para .ogg antes do envio.
+    Mantém o fluxo atual do Android e converte qualquer entrada para .ogg/opus.
     """
     try:
         if not _wa_is_configured():
@@ -1803,14 +1810,31 @@ def _forward_volunteer_audio_to_whatsapp(
 
         responsavel_whatsapp = _resolve_responsavel_whatsapp_by_encontro(cur, int(encontro_id))
 
-        # converte antes de enviar
         filename_ogg = _convert_audio_to_whatsapp_ogg(filename)
         audio_url = _build_public_audio_url(filename_ogg)
+
+        _dbg("WHATSAPP_AUDIO_PRONTO", {
+            "encontro_id": int(encontro_id),
+            "audio_original": filename,
+            "audio_convertido": filename_ogg,
+            "audio_url": audio_url,
+            "to": _to_wa_number(responsavel_whatsapp),
+        })
 
         meta_resp = _wa_send_audio_by_link(
             to_number=responsavel_whatsapp,
             audio_url=audio_url
         )
+
+        if not _meta_response_ok(meta_resp):
+            return {
+                "ok": False,
+                "erro": "whatsapp_audio_meta_failed",
+                "audio_original": filename,
+                "audio_convertido": filename_ogg,
+                "audio_url": audio_url,
+                "meta": meta_resp
+            }
 
         return {
             "ok": True,
