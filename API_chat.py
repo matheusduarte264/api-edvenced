@@ -1358,6 +1358,12 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     1) template aprovado
     2) localização
     3) foto
+
+    IMPORTANTE:
+    - Só marca onboarding_whatsapp_enviado=1 depois que template,
+      localização e foto forem enviados com sucesso.
+    - Se faltar qualquer dado, não envia nada.
+    - Se algum envio falhar, grava erro e mantém como não enviado.
     """
     try:
         eid = int(encontro_id)
@@ -1420,6 +1426,8 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             SELECT latitude, longitude, voluntario_nome
             FROM localizacoes
             WHERE encontro_id=%s
+              AND latitude IS NOT NULL
+              AND longitude IS NOT NULL
             ORDER BY id DESC
             LIMIT 1
         """, (eid,))
@@ -1429,8 +1437,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             return {"ok": False, "skipped": "localizacao_ausente"}
 
         lat, lng, voluntario_nome_loc = loc
-        if lat is None or lng is None:
-            return {"ok": False, "skipped": "latitude_longitude_ausente"}
 
         nome_voluntario_final = (
             (nome_voluntario or "").strip()
@@ -1438,9 +1444,23 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             or "Voluntário"
         )
 
-        nome_vulneravel_final = (nome_vulneravel or "").strip() or (nome_responsavel or "").strip() or "Pessoa"
+        nome_vulneravel_final = (
+            (nome_vulneravel or "").strip()
+            or (nome_responsavel or "").strip()
+            or "Pessoa"
+        )
 
         foto_url = f"{PUBLIC_BASE_URL}/media/fotos/{foto_arquivo}"
+
+        _dbg("WHATSAPP_ONBOARDING_PRONTO", {
+            "encontro_id": eid,
+            "responsavel_whatsapp": responsavel_whatsapp,
+            "tipo_vulneravel": tipo_vulneravel,
+            "nome_voluntario": nome_voluntario_final,
+            "latitude": float(lat),
+            "longitude": float(lng),
+            "foto_url": foto_url,
+        })
 
         # 1) TEMPLATE
         r1 = _wa_send_template(
@@ -1463,14 +1483,47 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             nome="Localização do encontro",
         )
 
+        if not _meta_response_ok(r2):
+            erro = {"ok": False, "erro": "location_failed", "detail": r2}
+            _set_whatsapp_error(cur, eid, erro)
+
+            cur.execute("""
+                UPDATE encontros
+                SET onboarding_whatsapp_enviado=0,
+                    onboarding_whatsapp_enviado_em=NULL
+                WHERE id=%s
+            """, (eid,))
+
+            return erro
+
         # 3) FOTO
         legenda = f"Tipo: {tipo_vulneravel} | Voluntário: {nome_voluntario_final}"
+
         r3 = _wa_send_image_by_link(
             to_number=responsavel_whatsapp,
             image_url=foto_url,
             caption=legenda,
         )
 
+        if not _meta_response_ok(r3):
+            erro = {
+                "ok": False,
+                "erro": "image_failed",
+                "detail": r3,
+                "foto_url": foto_url,
+            }
+            _set_whatsapp_error(cur, eid, erro)
+
+            cur.execute("""
+                UPDATE encontros
+                SET onboarding_whatsapp_enviado=0,
+                    onboarding_whatsapp_enviado_em=NULL
+                WHERE id=%s
+            """, (eid,))
+
+            return erro
+
+        # ✅ Só marca como enviado depois dos 3 envios com sucesso
         cur.execute("""
             UPDATE encontros
             SET onboarding_whatsapp_enviado=1,
@@ -1478,6 +1531,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 whatsapp_ultimo_erro=NULL
             WHERE id=%s
         """, (eid,))
+
         _clear_whatsapp_error(cur, eid)
 
         return {
@@ -1485,6 +1539,9 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "template": r1,
             "location": r2,
             "image": r3,
+            "foto_url": foto_url,
+            "latitude": float(lat),
+            "longitude": float(lng),
         }
 
     except HTTPException as e:
@@ -1493,25 +1550,43 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "erro": "http_exception",
             "detail": e.detail,
         }
+
         try:
+            cur.execute("""
+                UPDATE encontros
+                SET onboarding_whatsapp_enviado=0,
+                    onboarding_whatsapp_enviado_em=NULL
+                WHERE id=%s
+            """, (int(encontro_id),))
+
             _set_whatsapp_error(cur, int(encontro_id), erro)
         except Exception:
             pass
+
         return erro
 
     except Exception as e:
         _log_exc("Falha ao enviar onboarding para WhatsApp", e)
+
         erro = {
             "ok": False,
             "erro": "exception",
             "detail": repr(e),
         }
+
         try:
+            cur.execute("""
+                UPDATE encontros
+                SET onboarding_whatsapp_enviado=0,
+                    onboarding_whatsapp_enviado_em=NULL
+                WHERE id=%s
+            """, (int(encontro_id),))
+
             _set_whatsapp_error(cur, int(encontro_id), erro)
         except Exception:
             pass
-        return erro
 
+        return erro
 # =========================
 # QR / SCAN
 # =========================
