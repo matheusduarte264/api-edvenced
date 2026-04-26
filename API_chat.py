@@ -3568,30 +3568,15 @@ def alterar_status_chat(acao: str = Form(...)):
 # =========================
 
 def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
-    """
-    Resolve o encontro correto para uma resposta vinda do WhatsApp.
-
-    REGRA:
-    - Usa o telefone apenas para localizar o responsável
-    - Depois pega o encontro MAIS RECENTE e APTO A RESPOSTA:
-        * status = 'pendente'
-        * onboarding_whatsapp_enviado = 1
-    - Retorna também pulseira/login_vinculo/codigo_qr para amarrar a conversa
-    """
-
     wa_digits = _only_digits(wa_from or "")
     if not wa_digits:
-        # LOG 1:
-        _dbg("WHATSAPP/RESOLVE_ENCONTRO/WA_VAZIO", {
-            "wa_from": wa_from
-        })
+        _dbg("WHATSAPP/RESOLVE_ENCONTRO/WA_VAZIO", {"wa_from": wa_from})
         return None
 
     wa_com_ddi = _to_wa_number(wa_digits)
 
     candidatos = {wa_digits, wa_com_ddi}
 
-    # se vier com 55, também tenta sem 55
     if wa_digits.startswith("55") and len(wa_digits) >= 12:
         candidatos.add(wa_digits[2:])
 
@@ -3600,7 +3585,6 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
 
     candidatos = [c for c in candidatos if c]
 
-    # LOG 2:
     _dbg("WHATSAPP/RESOLVE_ENCONTRO/CANDIDATOS", {
         "wa_from_original": wa_from,
         "wa_digits": wa_digits,
@@ -3611,9 +3595,6 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
     if not candidatos:
         return None
 
-    # =========================
-    # 1) LOCALIZAR RESPONSÁVEL
-    # =========================
     placeholders = ", ".join(["%s"] * len(candidatos))
 
     sql_resp = f"""
@@ -3627,11 +3608,11 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
         ORDER BY id DESC
         LIMIT 1
     """
+
     cur.execute(sql_resp, tuple(candidatos + candidatos))
     resp = cur.fetchone()
 
     if not resp:
-        # LOG 3:
         _dbg("WHATSAPP/RESOLVE_ENCONTRO/RESPONSAVEL_NAO_ENCONTRADO", {
             "candidatos": candidatos
         })
@@ -3641,16 +3622,12 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
     telefone_legacy = resp[1]
     whatsapp_efetivo = resp[2]
 
-    # LOG 4:
     _dbg("WHATSAPP/RESOLVE_ENCONTRO/RESPONSAVEL_OK", {
         "responsavel_id": responsavel_id,
         "telefone_legacy": telefone_legacy,
         "whatsapp_efetivo": whatsapp_efetivo,
     })
 
-    # =========================
-    # 2) PEGAR O ENCONTRO ATIVO MAIS RECENTE
-    # =========================
     cur.execute("""
         SELECT
             e.id,
@@ -3667,10 +3644,10 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
         ORDER BY e.id DESC
         LIMIT 1
     """, (responsavel_id,))
+
     row = cur.fetchone()
 
     if not row:
-        # LOG 5:
         _dbg("WHATSAPP/RESOLVE_ENCONTRO/ENCONTRO_ATIVO_NAO_ENCONTRADO", {
             "responsavel_id": responsavel_id
         })
@@ -3687,7 +3664,6 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
         "onboarding_whatsapp_enviado": int(row[5] or 0),
     }
 
-    # LOG 6:
     _dbg("WHATSAPP/RESOLVE_ENCONTRO/ENCONTRO_OK", payload)
     return payload
 
@@ -3697,12 +3673,9 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
 # =========================
 
 def _wa_save_incoming_image_from_meta(media_id: str, original_mime_type: Optional[str] = None) -> str:
-    """
-    Baixa uma imagem recebida pelo WhatsApp e salva em FOTOS_DIR.
-    Retorna apenas o filename salvo.
-    """
     meta = _wa_get_media_url(media_id)
     media_url = meta.get("url")
+
     if not media_url:
         raise HTTPException(500, "Meta não retornou URL da imagem.")
 
@@ -3733,7 +3706,6 @@ def verificar_webhook_meta_whatsapp(
     hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
     hub_challenge: Optional[str] = Query(None, alias="hub.challenge"),
 ):
-    # LOG 7:
     _dbg("WHATSAPP/WEBHOOK_VERIFY_IN", {
         "hub.mode": hub_mode,
         "hub.verify_token": hub_verify_token,
@@ -3742,35 +3714,22 @@ def verificar_webhook_meta_whatsapp(
     })
 
     if hub_mode == "subscribe" and hub_verify_token == WHATSAPP_VERIFY_TOKEN and hub_challenge:
-        # LOG 8:
         _dbg("WHATSAPP/WEBHOOK_VERIFY_OK", {
             "hub.challenge": hub_challenge
         })
         return hub_challenge
 
-    # LOG 9:
     _dbg("WHATSAPP/WEBHOOK_VERIFY_FAIL", {
         "hub.mode": hub_mode,
         "hub.verify_token": hub_verify_token,
         "verify_token_esperado": WHATSAPP_VERIFY_TOKEN,
     })
+
     raise HTTPException(status_code=403, detail="token inválido")
 
 
 @app.post("/webhook/meta_whatsapp", tags=["whatsapp"])
 async def receber_webhook_meta_whatsapp(request: Request):
-    """
-    Fluxo:
-    - Recebe mensagens vindas do WhatsApp do responsável
-    - Usa o telefone apenas para identificar o responsável
-    - Resolve o encontro ativo mais recente com onboarding já enviado
-    - Se for texto: grava como mensagem pendente para o voluntário
-    - Se for áudio: baixa da Meta, salva no servidor e grava como pendente
-    - Se for imagem: baixa da Meta, salva em FOTOS_DIR e grava como pendente
-    - Se for localização: grava em localizacoes + cria mensagem texto com link do Maps
-    - Dispara _notify_poll(...) para o chat receber
-    """
-
     raw_body = ""
     body = {}
 
@@ -3780,7 +3739,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
     except Exception as e:
         _log_exc("Erro ao ler body bruto do webhook do WhatsApp", e)
 
-    # LOG 10:
     _dbg("WHATSAPP/WEBHOOK_POST_RAW", {
         "content_type": request.headers.get("content-type"),
         "body_raw": raw_body[:5000] if raw_body else ""
@@ -3792,13 +3750,11 @@ async def receber_webhook_meta_whatsapp(request: Request):
         _log_exc("Erro ao fazer parse JSON do webhook do WhatsApp", e)
         body = {}
 
-    # LOG 11:
     _dbg("WHATSAPP/WEBHOOK_POST_IN", body)
 
     try:
         entries = body.get("entry", []) or []
 
-        # LOG 12:
         _dbg("WHATSAPP/WEBHOOK_ENTRIES", {
             "entries_count": len(entries)
         })
@@ -3806,7 +3762,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
         for entry_idx, entry in enumerate(entries):
             changes = entry.get("changes", []) or []
 
-            # LOG 13:
             _dbg("WHATSAPP/WEBHOOK_ENTRY", {
                 "entry_idx": entry_idx,
                 "changes_count": len(changes),
@@ -3821,7 +3776,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                 messages = value.get("messages", []) or []
                 statuses = value.get("statuses", []) or []
 
-                # LOG 14:
                 _dbg("WHATSAPP/WEBHOOK_CHANGE", {
                     "entry_idx": entry_idx,
                     "change_idx": change_idx,
@@ -3832,9 +3786,7 @@ async def receber_webhook_meta_whatsapp(request: Request):
                     "value_keys": list((value or {}).keys()),
                 })
 
-                # ignora eventos sem mensagem (ex.: status de entrega/leitura)
                 if not messages:
-                    # LOG 15:
                     _dbg("WHATSAPP/WEBHOOK_SEM_MESSAGES", {
                         "entry_idx": entry_idx,
                         "change_idx": change_idx,
@@ -3867,7 +3819,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                     loc_name = None
                     loc_address = None
 
-                    # LOG 16:
                     _dbg("WHATSAPP/WEBHOOK_MSG_IN", {
                         "entry_idx": entry_idx,
                         "change_idx": change_idx,
@@ -3880,13 +3831,9 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         "msg_keys": list((msg or {}).keys()),
                     })
 
-                    # =========================
-                    # TEXTO
-                    # =========================
                     if msg_type == "text":
                         texto = (((msg.get("text") or {}).get("body")) or "").strip()
 
-                        # LOG 17:
                         _dbg("WHATSAPP/WEBHOOK_TEXTO_RECEBIDO", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
@@ -3894,15 +3841,11 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             "texto": texto,
                         })
 
-                    # =========================
-                    # ÁUDIO
-                    # =========================
                     elif msg_type == "audio":
                         audio_obj = msg.get("audio") or {}
                         audio_id = (audio_obj.get("id") or "").strip()
                         audio_mime_type = (audio_obj.get("mime_type") or "").strip()
 
-                        # LOG 18:
                         _dbg("WHATSAPP/WEBHOOK_AUDIO_RECEBIDO", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
@@ -3911,16 +3854,12 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             "audio_mime_type": audio_mime_type,
                         })
 
-                    # =========================
-                    # IMAGEM / FOTO
-                    # =========================
                     elif msg_type == "image":
                         image_obj = msg.get("image") or {}
                         image_id = (image_obj.get("id") or "").strip()
                         image_mime_type = (image_obj.get("mime_type") or "").strip()
                         image_caption = (image_obj.get("caption") or "").strip()
 
-                        # LOG 19:
                         _dbg("WHATSAPP/WEBHOOK_IMAGE_RECEBIDA", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
@@ -3930,9 +3869,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             "image_caption": image_caption,
                         })
 
-                    # =========================
-                    # LOCALIZAÇÃO
-                    # =========================
                     elif msg_type == "location":
                         loc_obj = msg.get("location") or {}
                         loc_lat = loc_obj.get("latitude")
@@ -3940,7 +3876,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         loc_name = (loc_obj.get("name") or "").strip()
                         loc_address = (loc_obj.get("address") or "").strip()
 
-                        # LOG 20:
                         _dbg("WHATSAPP/WEBHOOK_LOCATION_RECEBIDA", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
@@ -3951,9 +3886,7 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             "address": loc_address,
                         })
 
-                    # ignora outros tipos
                     else:
-                        # LOG 21:
                         _dbg("WHATSAPP/WEBHOOK_TIPO_IGNORADO", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
@@ -3963,7 +3896,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         continue
 
                     if msg_type == "text" and not texto:
-                        # LOG 22:
                         _dbg("WHATSAPP/WEBHOOK_TEXTO_VAZIO", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
@@ -3972,7 +3904,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         continue
 
                     if msg_type == "audio" and not audio_id:
-                        # LOG 23:
                         _dbg("WHATSAPP/WEBHOOK_AUDIO_SEM_ID", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
@@ -3981,7 +3912,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         continue
 
                     if msg_type == "image" and not image_id:
-                        # LOG 24:
                         _dbg("WHATSAPP/WEBHOOK_IMAGE_SEM_ID", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
@@ -3990,7 +3920,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         continue
 
                     if msg_type == "location" and (loc_lat is None or loc_lng is None):
-                        # LOG 25:
                         _dbg("WHATSAPP/WEBHOOK_LOCATION_INVALIDA", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
@@ -4001,21 +3930,17 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         continue
 
                     cnx, cur = _open_cursor()
+
                     try:
-                        # LOG 26:
                         _dbg("WHATSAPP/WEBHOOK_DB_CURSOR_OK", {
                             "wa_from": wa_from,
                             "msg_type": msg_type,
                             "msg_id": msg_id,
                         })
 
-                        # =========================
-                        # RESOLVER ENCONTRO ATIVO DO RESPONSÁVEL
-                        # =========================
                         encontro_info = _resolve_encontro_ativo_do_responsavel(cur, wa_from)
 
                         if not encontro_info:
-                            # LOG 27:
                             _dbg("WHATSAPP/WEBHOOK_SEM_ENCONTRO", {
                                 "wa_from": wa_from,
                                 "wa_from_name": wa_from_name,
@@ -4030,7 +3955,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         pulseira_id = encontro_info["pulseira_id"]
                         telefone_legacy = encontro_info["telefone_legacy"]
 
-                        # LOG 28:
                         _dbg("WHATSAPP/WEBHOOK_ENCONTRO_RESOLVIDO", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
@@ -4043,9 +3967,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             "telefone_legacy": telefone_legacy,
                         })
 
-                        # =========================
-                        # CASO 1: TEXTO
-                        # =========================
                         if msg_type == "text":
                             cur.execute("""
                                 INSERT INTO mensagens
@@ -4060,10 +3981,10 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 wa_from_name or "Responsável",
                                 telefone_legacy
                             ))
+
                             nova_msg_id = cur.lastrowid
                             cnx.commit()
 
-                            # LOG 29:
                             _dbg("WHATSAPP/WEBHOOK_TEXTO_SALVO", {
                                 "mensagem_id": nova_msg_id,
                                 "encontro_id": encontro_id,
@@ -4074,7 +3995,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
 
                             _notify_poll("voluntario", encontro_id, login_vinculo)
 
-                            # LOG 30:
                             _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
                                 "destino": "voluntario",
                                 "encontro_id": encontro_id,
@@ -4084,27 +4004,32 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             })
                             continue
 
-                        # =========================
-                        # CASO 2: ÁUDIO
-                        # =========================
                         if msg_type == "audio":
                             _dbg("WHATSAPP/WEBHOOK_AUDIO_BAIXANDO_META", {
                                 "audio_id": audio_id,
                                 "audio_mime_type": audio_mime_type,
                                 "encontro_id": encontro_id,
                             })
-                        
+
                             filename = _wa_save_incoming_audio_from_meta(
                                 media_id=audio_id,
                                 original_mime_type=audio_mime_type
                             )
-                        
+
+                            if isinstance(filename, tuple):
+                                filename = filename[0]
+
+                            filename = str(filename or "").strip()
+
+                            if not filename:
+                                raise Exception("arquivo_audio_filename_vazio")
+
                             _dbg("WHATSAPP/WEBHOOK_AUDIO_BAIXADO_META", {
                                 "arquivo_audio": filename,
                                 "audio_id": audio_id,
                                 "encontro_id": encontro_id,
                             })
-                        
+
                             cur.execute("""
                                 INSERT INTO mensagens
                                   (encontro_id, tipo, arquivo_audio, telefone_origem, nome_origem,
@@ -4118,10 +4043,10 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 wa_from_name or "Responsável",
                                 telefone_legacy
                             ))
-                        
+
                             nova_msg_id = cur.lastrowid
                             cnx.commit()
-                        
+
                             _dbg("WHATSAPP/WEBHOOK_AUDIO_SALVO", {
                                 "mensagem_id": nova_msg_id,
                                 "encontro_id": encontro_id,
@@ -4129,9 +4054,9 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 "codigo_qr": codigo_qr,
                                 "arquivo_audio": filename,
                             })
-                        
+
                             _notify_poll("voluntario", encontro_id, login_vinculo)
-                        
+
                             _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
                                 "destino": "voluntario",
                                 "encontro_id": encontro_id,
@@ -4139,96 +4064,9 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 "msg_type": "audio",
                                 "msg_id": msg_id,
                             })
-                        
                             continue
-                        
-                        # =========================
-                        # 🔥 FUNÇÃO PRINCIPAL AJUSTADA
-                        # =========================
-                        def _wa_save_incoming_audio_from_meta(media_id: str, original_mime_type: Optional[str] = None) -> str:
-                            """
-                            Baixa áudio do WhatsApp e:
-                            - salva original
-                            - converte para .m4a (iPhone compatível)
-                            - fallback automático se conversão falhar
-                            """
-                        
-                            meta = _wa_get_media_url(media_id)
-                            media_url = meta.get("url")
-                            if not media_url:
-                                raise HTTPException(500, "Meta não retornou URL da mídia.")
-                        
-                            audio_bytes = _wa_download_media_bytes(media_url)
-                        
-                            mime = (original_mime_type or meta.get("mime_type") or "").lower()
-                        
-                            # extensão original (backup)
-                            ext = ".ogg"
-                            if "mpeg" in mime or "mp3" in mime:
-                                ext = ".mp3"
-                            elif "wav" in mime:
-                                ext = ".wav"
-                            elif "aac" in mime:
-                                ext = ".aac"
-                            elif "webm" in mime:
-                                ext = ".webm"
-                            elif "m4a" in mime or "mp4" in mime:
-                                ext = ".m4a"
-                        
-                            # =========================
-                            # 💾 SALVA ORIGINAL
-                            # =========================
-                            filename_original = _unique_audio_name(f"meta_audio{ext}")
-                            path_original = os.path.join(AUDIOS_DIR, filename_original)
-                        
-                            with open(path_original, "wb") as f:
-                                f.write(audio_bytes)
-                        
-                            # =========================
-                            # 🔥 CONVERTE PARA M4A
-                            # =========================
-                            filename_final = _unique_audio_name("meta_audio.m4a")
-                            path_final = os.path.join(AUDIOS_DIR, filename_final)
-                        
-                            try:
-                                import subprocess
-                        
-                                cmd = [
-                                    "ffmpeg",
-                                    "-y",
-                                    "-i", path_original,
-                                    "-c:a", "aac",
-                                    "-b:a", "128k",
-                                    path_final
-                                ]
-                        
-                                subprocess.run(
-                                    cmd,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                    check=True
-                                )
-                        
-                                _dbg("AUDIO_CONVERTIDO_M4A", {
-                                    "original": filename_original,
-                                    "convertido": filename_final
-                                })
-                        
-                                return filename_final
-                        
-                            except Exception as e:
-                                # ⚠️ fallback → mantém funcionamento no Android
-                                _dbg("AUDIO_FALHA_CONVERSAO_USANDO_ORIGINAL", {
-                                    "erro": repr(e),
-                                    "arquivo": filename_original
-                                })
-                        
-                                return filename_original
-                        # =========================
-                        # CASO 3: FOTO / IMAGEM
-                        # =========================
+
                         if msg_type == "image":
-                            # LOG 35:
                             _dbg("WHATSAPP/WEBHOOK_IMAGE_BAIXANDO_META", {
                                 "image_id": image_id,
                                 "image_mime_type": image_mime_type,
@@ -4240,7 +4078,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 original_mime_type=image_mime_type
                             )
 
-                            # LOG 36:
                             _dbg("WHATSAPP/WEBHOOK_IMAGE_BAIXADA_META", {
                                 "arquivo_foto": filename,
                                 "image_id": image_id,
@@ -4261,10 +4098,10 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 wa_from_name or "Responsável",
                                 telefone_legacy
                             ))
+
                             nova_msg_id = cur.lastrowid
                             cnx.commit()
 
-                            # LOG 37:
                             _dbg("WHATSAPP/WEBHOOK_IMAGE_SALVA", {
                                 "mensagem_id": nova_msg_id,
                                 "encontro_id": encontro_id,
@@ -4276,7 +4113,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
 
                             _notify_poll("voluntario", encontro_id, login_vinculo)
 
-                            # LOG 38:
                             _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
                                 "destino": "voluntario",
                                 "encontro_id": encontro_id,
@@ -4286,14 +4122,10 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             })
                             continue
 
-                        # =========================
-                        # CASO 4: LOCALIZAÇÃO
-                        # =========================
                         if msg_type == "location":
                             lat = float(loc_lat)
                             lng = float(loc_lng)
 
-                            # 1) grava em localizacoes
                             cur.execute("""
                                 INSERT INTO localizacoes
                                   (encontro_id, voluntario_id, voluntario_nome, voluntario_telefone,
@@ -4316,7 +4148,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             if loc_address:
                                 texto_loc += f"\nEndereço: {loc_address}"
 
-                            # 2) cria mensagem de texto para garantir exibição no chat
                             cur.execute("""
                                 INSERT INTO mensagens
                                   (encontro_id, tipo, conteudo_texto, telefone_origem, nome_origem,
@@ -4330,10 +4161,10 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 wa_from_name or "Responsável",
                                 telefone_legacy
                             ))
+
                             nova_msg_id = cur.lastrowid
                             cnx.commit()
 
-                            # LOG 39:
                             _dbg("WHATSAPP/WEBHOOK_LOCATION_SALVA", {
                                 "mensagem_id": nova_msg_id,
                                 "encontro_id": encontro_id,
@@ -4348,7 +4179,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
 
                             _notify_poll("voluntario", encontro_id, login_vinculo)
 
-                            # LOG 40:
                             _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
                                 "destino": "voluntario",
                                 "encontro_id": encontro_id,
@@ -4362,35 +4192,35 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         cnx.rollback()
                         _log_exc("Erro ao processar webhook do WhatsApp", e)
 
-                        # LOG 41:
                         _dbg("WHATSAPP/WEBHOOK_PROCESSAMENTO_ERRO_CONTEXTO", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
                             "msg_type": msg_type,
                             "msg_id": msg_id,
                         })
+
                     finally:
                         try:
                             cur.close()
                         except Exception:
                             pass
+
                         try:
                             cnx.close()
                         except Exception:
                             pass
 
-        # LOG 42:
         _dbg("WHATSAPP/WEBHOOK_POST_OUT", {"ok": True})
         return {"ok": True}
 
     except Exception as e:
         _log_exc("Erro em /webhook/meta_whatsapp", e)
 
-        # LOG 43:
         _dbg("WHATSAPP/WEBHOOK_POST_OUT", {
             "ok": False,
             "error": repr(e)
         })
+
         return {"ok": False, "error": repr(e)}
 
 # =========================
