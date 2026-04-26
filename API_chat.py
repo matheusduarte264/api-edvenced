@@ -4033,54 +4033,91 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 "audio_mime_type": audio_mime_type,
                                 "encontro_id": encontro_id,
                             })
-
-                            filename = _wa_save_incoming_audio_from_meta(
-                                media_id=audio_id,
-                                original_mime_type=audio_mime_type
-                            )
-
-                            # LOG 32:
-                            _dbg("WHATSAPP/WEBHOOK_AUDIO_BAIXADO_META", {
-                                "arquivo_audio": filename,
-                                "audio_id": audio_id,
-                                "encontro_id": encontro_id,
-                            })
-
-                            cur.execute("""
-                                INSERT INTO mensagens
-                                  (encontro_id, tipo, arquivo_audio, telefone_origem, nome_origem,
-                                   telefone_alvo, status, pendente_para, remetente_tipo)
-                                VALUES
-                                  (%s, 'audio', %s, %s, %s, %s, 'pendente', 'voluntario', 'whatsapp')
-                            """, (
-                                encontro_id,
-                                filename,
-                                _only_digits(wa_from),
-                                wa_from_name or "Responsável",
-                                telefone_legacy
-                            ))
-                            nova_msg_id = cur.lastrowid
-                            cnx.commit()
-
-                            # LOG 33:
-                            _dbg("WHATSAPP/WEBHOOK_AUDIO_SALVO", {
-                                "mensagem_id": nova_msg_id,
-                                "encontro_id": encontro_id,
-                                "login_vinculo": login_vinculo,
-                                "codigo_qr": codigo_qr,
-                                "arquivo_audio": filename,
-                            })
-
-                            _notify_poll("voluntario", encontro_id, login_vinculo)
-
-                            # LOG 34:
-                            _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
-                                "destino": "voluntario",
-                                "encontro_id": encontro_id,
-                                "login_vinculo": login_vinculo,
-                                "msg_type": "audio",
-                                "msg_id": msg_id,
-                            })
+                        
+                            try:
+                                filename = _wa_save_incoming_audio_from_meta(
+                                    media_id=audio_id,
+                                    original_mime_type=audio_mime_type
+                                )
+                        
+                                # Segurança caso alguma versão antiga retorne tuple
+                                if isinstance(filename, tuple):
+                                    filename = filename[0]
+                        
+                                filename = str(filename or "").strip()
+                        
+                                if not filename:
+                                    raise Exception("arquivo_audio_filename_vazio")
+                        
+                                audio_path = os.path.join(AUDIOS_DIR, filename)
+                        
+                                if not os.path.exists(audio_path):
+                                    raise Exception(f"arquivo_audio_nao_existe: {audio_path}")
+                        
+                                if os.path.getsize(audio_path) <= 0:
+                                    raise Exception(f"arquivo_audio_vazio: {audio_path}")
+                        
+                                # LOG 32:
+                                _dbg("WHATSAPP/WEBHOOK_AUDIO_BAIXADO_META", {
+                                    "arquivo_audio": filename,
+                                    "audio_path": audio_path,
+                                    "audio_id": audio_id,
+                                    "audio_mime_type": audio_mime_type,
+                                    "encontro_id": encontro_id,
+                                })
+                        
+                                cur.execute("""
+                                    INSERT INTO mensagens
+                                      (encontro_id, tipo, arquivo_audio, telefone_origem, nome_origem,
+                                       telefone_alvo, status, pendente_para, remetente_tipo)
+                                    VALUES
+                                      (%s, 'audio', %s, %s, %s, %s, 'pendente', 'voluntario', 'whatsapp')
+                                """, (
+                                    encontro_id,
+                                    filename,
+                                    _only_digits(wa_from),
+                                    wa_from_name or "Responsável",
+                                    telefone_legacy
+                                ))
+                        
+                                nova_msg_id = cur.lastrowid
+                                cnx.commit()
+                        
+                                # LOG 33:
+                                _dbg("WHATSAPP/WEBHOOK_AUDIO_SALVO", {
+                                    "mensagem_id": nova_msg_id,
+                                    "encontro_id": encontro_id,
+                                    "login_vinculo": login_vinculo,
+                                    "codigo_qr": codigo_qr,
+                                    "arquivo_audio": filename,
+                                })
+                        
+                                _notify_poll("voluntario", encontro_id, login_vinculo)
+                        
+                                # LOG 34:
+                                _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
+                                    "destino": "voluntario",
+                                    "encontro_id": encontro_id,
+                                    "login_vinculo": login_vinculo,
+                                    "msg_type": "audio",
+                                    "msg_id": msg_id,
+                                })
+                        
+                            except Exception as e:
+                                cnx.rollback()
+                                _log_exc("WHATSAPP/WEBHOOK_AUDIO_ERRO", e)
+                        
+                                _dbg("WHATSAPP/WEBHOOK_AUDIO_ERRO_CONTEXTO", {
+                                    "audio_id": audio_id,
+                                    "audio_mime_type": audio_mime_type,
+                                    "wa_from": wa_from,
+                                    "wa_from_name": wa_from_name,
+                                    "encontro_id": encontro_id,
+                                    "login_vinculo": login_vinculo,
+                                    "codigo_qr": codigo_qr,
+                                    "erro": repr(e),
+                                })
+                        
                             continue
 
                         # =========================
