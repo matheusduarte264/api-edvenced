@@ -1347,24 +1347,51 @@ def _clear_whatsapp_error(cur, encontro_id: int):
 # =========================
 # DISPARO DO PACOTE COMPLETO
 # =========================
-# ✅ JÁ EXISTIA
-# Continua responsável por:
-# 1) template
-# 2) localização
-# 3) foto
 def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     """
-    Envia pacote completo ao responsável quando o onboarding estiver completo:
+    Envia ao responsável:
     1) template aprovado
     2) localização
     3) foto
 
-    IMPORTANTE:
-    - Só marca onboarding_whatsapp_enviado=1 depois que template,
-      localização e foto forem enviados com sucesso.
-    - Se faltar qualquer dado, não envia nada.
-    - Se algum envio falhar, grava erro e mantém como não enviado.
+    Regra de segurança:
+    - NÃO envia se ainda faltar tipo, foto ou localização.
+    - NÃO dispara fallback por dado incompleto.
+    - Fallback com telefone do voluntário só ocorre se houver erro real
+      no envio da localização ou exception técnica.
     """
+    responsavel_whatsapp = None
+    nome_voluntario_final = None
+    telefone_voluntario_final = None
+
+    def _fallback_contato_voluntario(motivo: str):
+        try:
+            if not responsavel_whatsapp:
+                return {"ok": False, "skipped": "sem_responsavel_whatsapp"}
+
+            tel_vol = _only_digits(telefone_voluntario_final or "")
+            nome_vol = (nome_voluntario_final or "").strip() or "Voluntário"
+
+            if not tel_vol or len(tel_vol) < 10:
+                return {"ok": False, "skipped": "telefone_voluntario_ausente"}
+
+            texto = (
+                "⚠️ Tivemos uma falha técnica no envio completo do alerta.\n\n"
+                "Para não perder o contato com quem encontrou a pessoa/pet:\n\n"
+                f"Voluntário: {nome_vol}\n"
+                f"Telefone: {tel_vol}\n\n"
+                "Tente falar diretamente com o voluntário."
+            )
+
+            return _wa_send_text(
+                to_number=responsavel_whatsapp,
+                texto=texto
+            )
+
+        except Exception as e:
+            _log_exc("Falha no fallback emergencial do voluntário", e)
+            return {"ok": False, "erro": "fallback_exception", "detail": repr(e), "motivo": motivo}
+
     try:
         eid = int(encontro_id)
 
@@ -1382,6 +1409,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 r.nome,
                 COALESCE(r.whatsapp, r.telefone) AS responsavel_whatsapp,
                 v.nome,
+                v.telefone,
                 p.nome_dependente
             FROM encontros e
             LEFT JOIN responsaveis r ON r.id = e.responsavel_id
@@ -1405,6 +1433,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             nome_responsavel,
             responsavel_whatsapp,
             nome_voluntario,
+            telefone_voluntario,
             nome_vulneravel,
         ) = row
 
@@ -1416,6 +1445,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             _set_whatsapp_error(cur, eid, erro)
             return erro
 
+        # ✅ Aqui NÃO manda fallback. Só aguarda completar o onboarding.
         if not tipo_vulneravel:
             return {"ok": False, "skipped": "tipo_vulneravel_ausente"}
 
@@ -1423,7 +1453,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             return {"ok": False, "skipped": "foto_arquivo_ausente"}
 
         cur.execute("""
-            SELECT latitude, longitude, voluntario_nome
+            SELECT latitude, longitude, voluntario_nome, voluntario_telefone
             FROM localizacoes
             WHERE encontro_id=%s
               AND latitude IS NOT NULL
@@ -1433,15 +1463,21 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         """, (eid,))
         loc = cur.fetchone()
 
+        # ✅ Aqui também NÃO manda fallback. Pode ser só timing: localização ainda não chegou.
         if not loc:
             return {"ok": False, "skipped": "localizacao_ausente"}
 
-        lat, lng, voluntario_nome_loc = loc
+        lat, lng, voluntario_nome_loc, voluntario_telefone_loc = loc
 
         nome_voluntario_final = (
             (nome_voluntario or "").strip()
             or (voluntario_nome_loc or "").strip()
             or "Voluntário"
+        )
+
+        telefone_voluntario_final = (
+            _only_digits(telefone_voluntario or "")
+            or _only_digits(voluntario_telefone_loc or "")
         )
 
         nome_vulneravel_final = (
@@ -1457,6 +1493,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "responsavel_whatsapp": responsavel_whatsapp,
             "tipo_vulneravel": tipo_vulneravel,
             "nome_voluntario": nome_voluntario_final,
+            "telefone_voluntario": telefone_voluntario_final,
             "latitude": float(lat),
             "longitude": float(lng),
             "foto_url": foto_url,
@@ -1484,7 +1521,15 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         )
 
         if not _meta_response_ok(r2):
-            erro = {"ok": False, "erro": "location_failed", "detail": r2}
+            fallback = _fallback_contato_voluntario("location_failed")
+
+            erro = {
+                "ok": False,
+                "erro": "location_failed",
+                "detail": r2,
+                "fallback_voluntario": fallback,
+            }
+
             _set_whatsapp_error(cur, eid, erro)
 
             cur.execute("""
@@ -1512,6 +1557,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "detail": r3,
                 "foto_url": foto_url,
             }
+
             _set_whatsapp_error(cur, eid, erro)
 
             cur.execute("""
@@ -1523,7 +1569,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
             return erro
 
-        # ✅ Só marca como enviado depois dos 3 envios com sucesso
         cur.execute("""
             UPDATE encontros
             SET onboarding_whatsapp_enviado=1,
@@ -1545,10 +1590,13 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         }
 
     except HTTPException as e:
+        fallback = _fallback_contato_voluntario("http_exception")
+
         erro = {
             "ok": False,
             "erro": "http_exception",
             "detail": e.detail,
+            "fallback_voluntario": fallback,
         }
 
         try:
@@ -1568,10 +1616,13 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     except Exception as e:
         _log_exc("Falha ao enviar onboarding para WhatsApp", e)
 
+        fallback = _fallback_contato_voluntario("exception")
+
         erro = {
             "ok": False,
             "erro": "exception",
             "detail": repr(e),
+            "fallback_voluntario": fallback,
         }
 
         try:
