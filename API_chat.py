@@ -1193,9 +1193,9 @@ def _wa_send_audio_by_link(to_number: str, audio_url: str):
     return _wa_post(payload)
 
 
-# =========================
+# ================================================================================================================================================================
 # SUPORTE A ÁUDIO VINDO DA META
-# =========================
+# ================================================================================================================================================================
 # Essas funções serão usadas no webhook para:
 # 1) pegar o ID do áudio enviado pelo responsável
 # 2) consultar a URL temporária da Meta
@@ -1203,100 +1203,90 @@ def _wa_send_audio_by_link(to_number: str, audio_url: str):
 # 4) salvar no servidor
 # 5) depois inserir no chat como mensagem pendente para o voluntário
 
-# 🆕 ENTROU AGORA
-def _wa_get_media_url(media_id: str) -> dict:
-    if not media_id:
-        raise HTTPException(400, "media_id ausente.")
+# =========================
+# 🔊 NORMALIZAÇÃO DE ÁUDIO (iPhone + Android)
+# =========================
+# Ajuste:
+# - WhatsApp envia áudio em .ogg/.opus
+# - iPhone não toca bem esse formato no navegador
+# - Convertemos para .m4a (AAC)
+# - Android continua funcionando normalmente
 
-    if not WHATSAPP_TOKEN:
-        raise HTTPException(500, "WHATSAPP_TOKEN não configurado.")
-
-    url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{media_id}"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-    }
-
-    resp = requests.get(url, headers=headers, timeout=30)
-
-    try:
-        data = resp.json()
-    except Exception:
-        data = {"raw": resp.text}
-
-    if not resp.ok:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "erro": "Falha ao consultar mídia na Meta",
-                "status_code": resp.status_code,
-                "resposta_meta": data,
-            },
-        )
-
-    return data
-
-
-# 🆕 ENTROU AGORA
-def _wa_download_media_bytes(media_url: str) -> bytes:
-    if not media_url:
-        raise HTTPException(400, "media_url ausente.")
-
-    if not WHATSAPP_TOKEN:
-        raise HTTPException(500, "WHATSAPP_TOKEN não configurado.")
-
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-    }
-
-    resp = requests.get(media_url, headers=headers, timeout=60)
-
-    if not resp.ok:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "erro": "Falha ao baixar mídia da Meta",
-                "status_code": resp.status_code,
-                "resposta_meta": resp.text,
-            },
-        )
-
-    return resp.content
-
-
-# 🆕 ENTROU AGORA
-# Baixa um áudio que veio do WhatsApp e salva em AUDIOS_DIR
 def _wa_save_incoming_audio_from_meta(media_id: str, original_mime_type: Optional[str] = None) -> str:
     meta = _wa_get_media_url(media_id)
     media_url = meta.get("url")
+
     if not media_url:
         raise HTTPException(500, "Meta não retornou URL da mídia.")
 
     audio_bytes = _wa_download_media_bytes(media_url)
 
-    # escolhe extensão razoável
-    ext = ".ogg"
     mime = (original_mime_type or meta.get("mime_type") or "").lower()
 
+    # =========================
+    # Escolha do formato original
+    # =========================
+    temp_ext = ".ogg"
+
     if "mpeg" in mime or "mp3" in mime:
-        ext = ".mp3"
+        temp_ext = ".mp3"
     elif "wav" in mime:
-        ext = ".wav"
+        temp_ext = ".wav"
     elif "aac" in mime:
-        ext = ".aac"
+        temp_ext = ".aac"
     elif "webm" in mime:
-        ext = ".webm"
-    elif "ogg" in mime:
-        ext = ".ogg"
+        temp_ext = ".webm"
     elif "m4a" in mime or "mp4" in mime:
-        ext = ".m4a"
+        temp_ext = ".m4a"
+    elif "ogg" in mime or "opus" in mime:
+        temp_ext = ".ogg"
 
-    filename = _unique_audio_name(f"meta_audio{ext}")
-    path = os.path.join(AUDIOS_DIR, filename)
+    temp_filename = _unique_audio_name(f"meta_audio_original{temp_ext}")
+    temp_path = os.path.join(AUDIOS_DIR, temp_filename)
 
-    with open(path, "wb") as f:
+    with open(temp_path, "wb") as f:
         f.write(audio_bytes)
 
-    return filename
+    # =========================
+    # Se já é compatível → NÃO converte
+    # =========================
+    if temp_ext in (".mp3", ".m4a", ".aac", ".wav"):
+        return temp_filename
+
+    # =========================
+    # Converte para .m4a (iPhone compatível)
+    # =========================
+    base, _ = os.path.splitext(temp_filename)
+    final_filename = f"{base}.m4a"
+    final_path = os.path.join(AUDIOS_DIR, final_filename)
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", temp_path,
+        "-vn",
+        "-ac", "1",
+        "-ar", "44100",
+        "-c:a", "aac",
+        "-b:a", "96k",
+        final_path
+    ]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    # =========================
+    # Se falhar → mantém original (não quebra Android)
+    # =========================
+    if proc.returncode != 0 or not os.path.exists(final_path) or os.path.getsize(final_path) <= 0:
+        return temp_filename
+
+    # remove original
+    try:
+        os.remove(temp_path)
+    except Exception:
+        pass
+
+    return final_filename
 
 
 # =========================
