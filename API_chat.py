@@ -4024,7 +4024,7 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             continue
 
                         # =========================
-                        # CASO 2: ÁUDIO
+                        # CASO 2: ÁUDIO (Ajustado)
                         # =========================
                         if msg_type == "audio":
                             # LOG 31:
@@ -4040,11 +4040,16 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                     original_mime_type=audio_mime_type
                                 )
                         
-                                # Segurança caso alguma versão antiga retorne tuple
                                 if isinstance(filename, tuple):
                                     filename = filename[0]
                         
                                 filename = str(filename or "").strip()
+                        
+                                _dbg("DEBUG/AUDIO_FILENAME_GERADO", {
+                                    "filename": filename,
+                                    "audio_id": audio_id,
+                                    "audio_mime_type": audio_mime_type,
+                                })
                         
                                 if not filename:
                                     raise Exception("arquivo_audio_filename_vazio")
@@ -4062,7 +4067,6 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                     "arquivo_audio": filename,
                                     "audio_path": audio_path,
                                     "audio_id": audio_id,
-                                    "audio_mime_type": audio_mime_type,
                                     "encontro_id": encontro_id,
                                 })
                         
