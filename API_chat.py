@@ -1354,11 +1354,11 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     2) localização
     3) foto
 
-    Versão segura:
-    - Não usa fallback de número emergencial agora.
-    - Só envia quando tipo, foto e localização existem.
-    - Tenta enviar template + localização + foto.
-    - Se tentar os 3, libera o chat marcando onboarding_whatsapp_enviado=1.
+    Regra:
+    - Não usa fallback emergencial agora.
+    - Só tenta enviar quando tipo, foto e localização existem.
+    - Tenta enviar os 3 itens.
+    - Depois da tentativa do pacote, libera o chat.
     """
     try:
         eid = int(encontro_id)
@@ -1462,40 +1462,42 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
         resultados = {}
 
-        # 1) TEMPLATE
         try:
-            r1 = _wa_send_template(
+            resultados["template"] = _wa_send_template(
                 to_number=responsavel_whatsapp,
                 nome=nome_vulneravel_final,
                 tipo=tipo_vulneravel,
                 voluntario=nome_voluntario_final,
             )
-            resultados["template"] = r1
         except Exception as e:
-            resultados["template"] = {"ok": False, "erro": "template_exception", "detail": repr(e)}
+            resultados["template"] = {
+                "ok": False,
+                "erro": "template_exception",
+                "detail": repr(e),
+            }
 
-        # 2) LOCALIZAÇÃO
         try:
-            r2 = _wa_send_location(
+            resultados["location"] = _wa_send_location(
                 to_number=responsavel_whatsapp,
                 latitude=float(lat),
                 longitude=float(lng),
                 nome="Localização do encontro",
             )
-            resultados["location"] = r2
         except Exception as e:
-            resultados["location"] = {"ok": False, "erro": "location_exception", "detail": repr(e)}
+            resultados["location"] = {
+                "ok": False,
+                "erro": "location_exception",
+                "detail": repr(e),
+            }
 
-        # 3) FOTO
         try:
             legenda = f"Tipo: {tipo_vulneravel} | Voluntário: {nome_voluntario_final}"
 
-            r3 = _wa_send_image_by_link(
+            resultados["image"] = _wa_send_image_by_link(
                 to_number=responsavel_whatsapp,
                 image_url=foto_url,
                 caption=legenda,
             )
-            resultados["image"] = r3
         except Exception as e:
             resultados["image"] = {
                 "ok": False,
@@ -1508,25 +1510,33 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         location_ok = _meta_response_ok(resultados.get("location"))
         image_ok = _meta_response_ok(resultados.get("image"))
 
-        # ✅ Para liberar o chat, mantém o comportamento da API antiga:
-        # se tentou o pacote completo, libera o chat.
-        # Os erros ficam salvos para diagnóstico.
+        pacote_ok = bool(template_ok and location_ok and image_ok)
+
+        erro_txt = None
+        if not pacote_ok:
+            erro_txt = json.dumps({
+                "template_ok": template_ok,
+                "location_ok": location_ok,
+                "image_ok": image_ok,
+                "resultados": resultados,
+                "foto_url": foto_url,
+                "latitude": float(lat),
+                "longitude": float(lng),
+            }, ensure_ascii=False)[:5000]
+
         cur.execute("""
             UPDATE encontros
             SET onboarding_whatsapp_enviado=1,
                 onboarding_whatsapp_enviado_em=NOW(),
                 whatsapp_ultimo_erro=%s
             WHERE id=%s
-        """, (
-            None if (template_ok and location_ok and image_ok) else json.dumps(resultados, ensure_ascii=False)[:5000],
-            eid
-        ))
+        """, (erro_txt, eid))
 
-        if template_ok and location_ok and image_ok:
+        if pacote_ok:
             _clear_whatsapp_error(cur, eid)
 
         return {
-            "ok": bool(template_ok and location_ok and image_ok),
+            "ok": pacote_ok,
             "chat_liberado": True,
             "template_ok": template_ok,
             "location_ok": location_ok,
