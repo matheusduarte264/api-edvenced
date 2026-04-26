@@ -1576,6 +1576,48 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             pass
 
         return erro
+
+# =========================
+# FALLBACK - PERDA DE CONEXÃO DO VOLUNTÁRIO
+# =========================
+def _wa_fallback_voluntario_sem_conexao(
+    to_number,
+    nome_voluntario,
+    telefone_voluntario,
+    latitude=None,
+    longitude=None
+):
+    try:
+        if not to_number:
+            return {"ok": False, "skipped": "sem_destino"}
+
+        tel = _only_digits(telefone_voluntario or "")
+        if not tel or len(tel) < 10:
+            return {"ok": False, "skipped": "telefone_invalido"}
+
+        nome = (nome_voluntario or "").strip() or "Voluntário"
+
+        mapa = ""
+        if latitude and longitude:
+            mapa = f"\n📍 Localização aproximada:\nhttps://maps.google.com/?q={latitude},{longitude}\n"
+
+        texto = (
+            "⚠️ Conexão do voluntário foi perdida durante o atendimento.\n\n"
+            "Para não perder o contato:\n\n"
+            f"👤 Voluntário: {nome}\n"
+            f"📞 Telefone: {tel}\n"
+            f"{mapa}\n"
+            "Recomendamos entrar em contato diretamente."
+        )
+
+        return _wa_send_text(
+            to_number=to_number,
+            texto=texto
+        )
+
+    except Exception as e:
+        _log_exc("Erro no fallback de perda de conexão", e)
+        return {"ok": False, "erro": "fallback_exception", "detail": repr(e)}
 # =========================
 # QR / SCAN
 # =========================
