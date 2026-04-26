@@ -4024,106 +4024,157 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             continue
 
                         # =========================
-                        # CASO 2: ÁUDIO (Ajustado)
+                        # SUPORTE A ÁUDIO VINDO DA META
                         # =========================
-                        if msg_type == "audio":
-                            # LOG 31:
-                            _dbg("WHATSAPP/WEBHOOK_AUDIO_BAIXANDO_META", {
-                                "audio_id": audio_id,
-                                "audio_mime_type": audio_mime_type,
-                                "encontro_id": encontro_id,
-                            })
+                        # Essas funções serão usadas no webhook para:
+                        # 1) pegar o ID do áudio enviado pelo responsável
+                        # 2) consultar a URL temporária da Meta
+                        # 3) baixar o binário
+                        # 4) salvar no servidor
+                        # 5) converter para .m4a (compatível com iPhone)
+                        # 6) fallback automático se der erro (não quebra Android)
+                        
+                        
+                        def _wa_get_media_url(media_id: str) -> dict:
+                            if not media_id:
+                                raise HTTPException(400, "media_id ausente.")
+                        
+                            if not WHATSAPP_TOKEN:
+                                raise HTTPException(500, "WHATSAPP_TOKEN não configurado.")
+                        
+                            url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{media_id}"
+                            headers = {
+                                "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                            }
+                        
+                            resp = requests.get(url, headers=headers, timeout=30)
                         
                             try:
-                                filename = _wa_save_incoming_audio_from_meta(
-                                    media_id=audio_id,
-                                    original_mime_type=audio_mime_type
+                                data = resp.json()
+                            except Exception:
+                                data = {"raw": resp.text}
+                        
+                            if not resp.ok:
+                                raise HTTPException(
+                                    status_code=500,
+                                    detail={
+                                        "erro": "Falha ao consultar mídia na Meta",
+                                        "status_code": resp.status_code,
+                                        "resposta_meta": data,
+                                    },
                                 )
                         
-                                if isinstance(filename, tuple):
-                                    filename = filename[0]
+                            return data
                         
-                                filename = str(filename or "").strip()
                         
-                                _dbg("DEBUG/AUDIO_FILENAME_GERADO", {
-                                    "filename": filename,
-                                    "audio_id": audio_id,
-                                    "audio_mime_type": audio_mime_type,
+                        def _wa_download_media_bytes(media_url: str) -> bytes:
+                            if not media_url:
+                                raise HTTPException(400, "media_url ausente.")
+                        
+                            if not WHATSAPP_TOKEN:
+                                raise HTTPException(500, "WHATSAPP_TOKEN não configurado.")
+                        
+                            headers = {
+                                "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                            }
+                        
+                            resp = requests.get(media_url, headers=headers, timeout=60)
+                        
+                            if not resp.ok:
+                                raise HTTPException(
+                                    status_code=500,
+                                    detail={
+                                        "erro": "Falha ao baixar mídia da Meta",
+                                        "status_code": resp.status_code,
+                                        "resposta_meta": resp.text,
+                                    },
+                                )
+                        
+                            return resp.content
+                        
+                        
+                        # =========================
+                        # 🔥 FUNÇÃO PRINCIPAL AJUSTADA
+                        # =========================
+                        def _wa_save_incoming_audio_from_meta(media_id: str, original_mime_type: Optional[str] = None) -> str:
+                            """
+                            Baixa áudio do WhatsApp e:
+                            - salva original
+                            - converte para .m4a (iPhone compatível)
+                            - fallback automático se conversão falhar
+                            """
+                        
+                            meta = _wa_get_media_url(media_id)
+                            media_url = meta.get("url")
+                            if not media_url:
+                                raise HTTPException(500, "Meta não retornou URL da mídia.")
+                        
+                            audio_bytes = _wa_download_media_bytes(media_url)
+                        
+                            mime = (original_mime_type or meta.get("mime_type") or "").lower()
+                        
+                            # extensão original (backup)
+                            ext = ".ogg"
+                            if "mpeg" in mime or "mp3" in mime:
+                                ext = ".mp3"
+                            elif "wav" in mime:
+                                ext = ".wav"
+                            elif "aac" in mime:
+                                ext = ".aac"
+                            elif "webm" in mime:
+                                ext = ".webm"
+                            elif "m4a" in mime or "mp4" in mime:
+                                ext = ".m4a"
+                        
+                            # =========================
+                            # 💾 SALVA ORIGINAL
+                            # =========================
+                            filename_original = _unique_audio_name(f"meta_audio{ext}")
+                            path_original = os.path.join(AUDIOS_DIR, filename_original)
+                        
+                            with open(path_original, "wb") as f:
+                                f.write(audio_bytes)
+                        
+                            # =========================
+                            # 🔥 CONVERTE PARA M4A
+                            # =========================
+                            filename_final = _unique_audio_name("meta_audio.m4a")
+                            path_final = os.path.join(AUDIOS_DIR, filename_final)
+                        
+                            try:
+                                import subprocess
+                        
+                                cmd = [
+                                    "ffmpeg",
+                                    "-y",
+                                    "-i", path_original,
+                                    "-c:a", "aac",
+                                    "-b:a", "128k",
+                                    path_final
+                                ]
+                        
+                                subprocess.run(
+                                    cmd,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    check=True
+                                )
+                        
+                                _dbg("AUDIO_CONVERTIDO_M4A", {
+                                    "original": filename_original,
+                                    "convertido": filename_final
                                 })
                         
-                                if not filename:
-                                    raise Exception("arquivo_audio_filename_vazio")
-                        
-                                audio_path = os.path.join(AUDIOS_DIR, filename)
-                        
-                                if not os.path.exists(audio_path):
-                                    raise Exception(f"arquivo_audio_nao_existe: {audio_path}")
-                        
-                                if os.path.getsize(audio_path) <= 0:
-                                    raise Exception(f"arquivo_audio_vazio: {audio_path}")
-                        
-                                # LOG 32:
-                                _dbg("WHATSAPP/WEBHOOK_AUDIO_BAIXADO_META", {
-                                    "arquivo_audio": filename,
-                                    "audio_path": audio_path,
-                                    "audio_id": audio_id,
-                                    "encontro_id": encontro_id,
-                                })
-                        
-                                cur.execute("""
-                                    INSERT INTO mensagens
-                                      (encontro_id, tipo, arquivo_audio, telefone_origem, nome_origem,
-                                       telefone_alvo, status, pendente_para, remetente_tipo)
-                                    VALUES
-                                      (%s, 'audio', %s, %s, %s, %s, 'pendente', 'voluntario', 'whatsapp')
-                                """, (
-                                    encontro_id,
-                                    filename,
-                                    _only_digits(wa_from),
-                                    wa_from_name or "Responsável",
-                                    telefone_legacy
-                                ))
-                        
-                                nova_msg_id = cur.lastrowid
-                                cnx.commit()
-                        
-                                # LOG 33:
-                                _dbg("WHATSAPP/WEBHOOK_AUDIO_SALVO", {
-                                    "mensagem_id": nova_msg_id,
-                                    "encontro_id": encontro_id,
-                                    "login_vinculo": login_vinculo,
-                                    "codigo_qr": codigo_qr,
-                                    "arquivo_audio": filename,
-                                })
-                        
-                                _notify_poll("voluntario", encontro_id, login_vinculo)
-                        
-                                # LOG 34:
-                                _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
-                                    "destino": "voluntario",
-                                    "encontro_id": encontro_id,
-                                    "login_vinculo": login_vinculo,
-                                    "msg_type": "audio",
-                                    "msg_id": msg_id,
-                                })
+                                return filename_final
                         
                             except Exception as e:
-                                cnx.rollback()
-                                _log_exc("WHATSAPP/WEBHOOK_AUDIO_ERRO", e)
-                        
-                                _dbg("WHATSAPP/WEBHOOK_AUDIO_ERRO_CONTEXTO", {
-                                    "audio_id": audio_id,
-                                    "audio_mime_type": audio_mime_type,
-                                    "wa_from": wa_from,
-                                    "wa_from_name": wa_from_name,
-                                    "encontro_id": encontro_id,
-                                    "login_vinculo": login_vinculo,
-                                    "codigo_qr": codigo_qr,
+                                # ⚠️ fallback → mantém funcionamento no Android
+                                _dbg("AUDIO_FALHA_CONVERSAO_USANDO_ORIGINAL", {
                                     "erro": repr(e),
+                                    "arquivo": filename_original
                                 })
                         
-                            continue
-
+                                return filename_original
                         # =========================
                         # CASO 3: FOTO / IMAGEM
                         # =========================
