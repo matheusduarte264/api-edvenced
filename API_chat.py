@@ -1193,24 +1193,73 @@ def _wa_send_audio_by_link(to_number: str, audio_url: str):
     return _wa_post(payload)
 
 
-# ================================================================================================================================================================
+# =========================
 # SUPORTE A ÁUDIO VINDO DA META
-# ================================================================================================================================================================
-# Essas funções serão usadas no webhook para:
-# 1) pegar o ID do áudio enviado pelo responsável
-# 2) consultar a URL temporária da Meta
-# 3) baixar o binário
-# 4) salvar no servidor
-# 5) depois inserir no chat como mensagem pendente para o voluntário
+# =========================
+# Compatível com Android e iPhone:
+# - baixa o áudio original da Meta
+# - salva o original como backup
+# - tenta converter para .m4a/AAC
+# - se converter, retorna .m4a
+# - se falhar, retorna original para não perder o áudio
 
-# =========================
-# 🔊 NORMALIZAÇÃO DE ÁUDIO (iPhone + Android)
-# =========================
-# Ajuste:
-# - WhatsApp envia áudio em .ogg/.opus
-# - iPhone não toca bem esse formato no navegador
-# - Convertemos para .m4a (AAC)
-# - Android continua funcionando normalmente
+def _wa_get_media_url(media_id: str) -> dict:
+    if not media_id:
+        raise HTTPException(400, "media_id ausente.")
+
+    if not WHATSAPP_TOKEN:
+        raise HTTPException(500, "WHATSAPP_TOKEN não configurado.")
+
+    url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{media_id}"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+    }
+
+    resp = requests.get(url, headers=headers, timeout=30)
+
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": resp.text}
+
+    if not resp.ok:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "erro": "Falha ao consultar mídia na Meta",
+                "status_code": resp.status_code,
+                "resposta_meta": data,
+            },
+        )
+
+    return data
+
+
+def _wa_download_media_bytes(media_url: str) -> bytes:
+    if not media_url:
+        raise HTTPException(400, "media_url ausente.")
+
+    if not WHATSAPP_TOKEN:
+        raise HTTPException(500, "WHATSAPP_TOKEN não configurado.")
+
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+    }
+
+    resp = requests.get(media_url, headers=headers, timeout=60)
+
+    if not resp.ok:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "erro": "Falha ao baixar mídia da Meta",
+                "status_code": resp.status_code,
+                "resposta_meta": resp.text,
+            },
+        )
+
+    return resp.content
+
 
 def _wa_save_incoming_audio_from_meta(media_id: str, original_mime_type: Optional[str] = None) -> str:
     meta = _wa_get_media_url(media_id)
@@ -1223,57 +1272,69 @@ def _wa_save_incoming_audio_from_meta(media_id: str, original_mime_type: Optiona
 
     mime = (original_mime_type or meta.get("mime_type") or "").lower()
 
-    # =========================
-    # Escolha do formato original
-    # =========================
-    temp_ext = ".ogg"
-
+    ext = ".ogg"
     if "mpeg" in mime or "mp3" in mime:
-        temp_ext = ".mp3"
+        ext = ".mp3"
     elif "wav" in mime:
-        temp_ext = ".wav"
+        ext = ".wav"
     elif "aac" in mime:
-        temp_ext = ".aac"
+        ext = ".aac"
     elif "webm" in mime:
-        temp_ext = ".webm"
+        ext = ".webm"
     elif "m4a" in mime or "mp4" in mime:
-        temp_ext = ".m4a"
+        ext = ".m4a"
     elif "ogg" in mime or "opus" in mime:
-        temp_ext = ".ogg"
+        ext = ".ogg"
 
-    temp_filename = _unique_audio_name(f"meta_audio_original{temp_ext}")
-    temp_path = os.path.join(AUDIOS_DIR, temp_filename)
+    filename_original = _unique_audio_name(f"meta_audio_original{ext}")
+    path_original = os.path.join(AUDIOS_DIR, filename_original)
 
-    with open(temp_path, "wb") as f:
+    with open(path_original, "wb") as f:
         f.write(audio_bytes)
 
-    # =========================
-    # Se já é compatível → NÃO converte
-    # =========================
-    if temp_ext in (".mp3", ".m4a", ".aac", ".wav"):
-        return temp_filename
+    if ext in (".mp3", ".m4a", ".aac", ".wav"):
+        return filename_original
 
-    # =========================
-    # Converte para .m4a (iPhone compatível)
-    # =========================
-    base, _ = os.path.splitext(temp_filename)
-    final_filename = f"{base}.m4a"
-    final_path = os.path.join(AUDIOS_DIR, final_filename)
+    base, _ = os.path.splitext(filename_original)
+    filename_final = f"{base}_ios_android.m4a"
+    path_final = os.path.join(AUDIOS_DIR, filename_final)
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", temp_path,
-        "-vn",
-        "-ac", "1",
-        "-ar", "44100",
-        "-c:a", "aac",
-        "-b:a", "96k",
-        final_path
-    ]
+    try:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", path_original,
+            "-vn",
+            "-ac", "1",
+            "-ar", "44100",
+            "-c:a", "aac",
+            "-b:a", "96k",
+            path_final
+        ]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True
+        )
 
+        if proc.returncode == 0 and os.path.exists(path_final) and os.path.getsize(path_final) > 0:
+            _dbg("AUDIO_META_CONVERTIDO_M4A", {
+                "original": filename_original,
+                "convertido": filename_final,
+                "mime": mime,
+            })
+            return filename_final
+
+        _dbg("AUDIO_META_CONVERSAO_FALHOU_USANDO_ORIGINAL", {
+            "original": filename_original,
+            "stderr": (proc.stderr or "")[-2000:],
+        })
+
+    except Exception as e:
+        _log_exc("Falha ao converter áudio Meta para m4a", e)
+
+    return filename_original
     # =========================
     # Se falhar → mantém original (não quebra Android)
     # =========================
@@ -4024,74 +4085,62 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             continue
 
                         # =========================
-                        # SUPORTE A ÁUDIO VINDO DA META
+                        # CASO 2: ÁUDIO
                         # =========================
-                        # Essas funções serão usadas no webhook para:
-                        # 1) pegar o ID do áudio enviado pelo responsável
-                        # 2) consultar a URL temporária da Meta
-                        # 3) baixar o binário
-                        # 4) salvar no servidor
-                        # 5) converter para .m4a (compatível com iPhone)
-                        # 6) fallback automático se der erro (não quebra Android)
+                        if msg_type == "audio":
+                            _dbg("WHATSAPP/WEBHOOK_AUDIO_BAIXANDO_META", {
+                                "audio_id": audio_id,
+                                "audio_mime_type": audio_mime_type,
+                                "encontro_id": encontro_id,
+                            })
                         
+                            filename = _wa_save_incoming_audio_from_meta(
+                                media_id=audio_id,
+                                original_mime_type=audio_mime_type
+                            )
                         
-                        def _wa_get_media_url(media_id: str) -> dict:
-                            if not media_id:
-                                raise HTTPException(400, "media_id ausente.")
+                            _dbg("WHATSAPP/WEBHOOK_AUDIO_BAIXADO_META", {
+                                "arquivo_audio": filename,
+                                "audio_id": audio_id,
+                                "encontro_id": encontro_id,
+                            })
                         
-                            if not WHATSAPP_TOKEN:
-                                raise HTTPException(500, "WHATSAPP_TOKEN não configurado.")
+                            cur.execute("""
+                                INSERT INTO mensagens
+                                  (encontro_id, tipo, arquivo_audio, telefone_origem, nome_origem,
+                                   telefone_alvo, status, pendente_para, remetente_tipo)
+                                VALUES
+                                  (%s, 'audio', %s, %s, %s, %s, 'pendente', 'voluntario', 'whatsapp')
+                            """, (
+                                encontro_id,
+                                filename,
+                                _only_digits(wa_from),
+                                wa_from_name or "Responsável",
+                                telefone_legacy
+                            ))
                         
-                            url = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}/{media_id}"
-                            headers = {
-                                "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-                            }
+                            nova_msg_id = cur.lastrowid
+                            cnx.commit()
                         
-                            resp = requests.get(url, headers=headers, timeout=30)
+                            _dbg("WHATSAPP/WEBHOOK_AUDIO_SALVO", {
+                                "mensagem_id": nova_msg_id,
+                                "encontro_id": encontro_id,
+                                "login_vinculo": login_vinculo,
+                                "codigo_qr": codigo_qr,
+                                "arquivo_audio": filename,
+                            })
                         
-                            try:
-                                data = resp.json()
-                            except Exception:
-                                data = {"raw": resp.text}
+                            _notify_poll("voluntario", encontro_id, login_vinculo)
                         
-                            if not resp.ok:
-                                raise HTTPException(
-                                    status_code=500,
-                                    detail={
-                                        "erro": "Falha ao consultar mídia na Meta",
-                                        "status_code": resp.status_code,
-                                        "resposta_meta": data,
-                                    },
-                                )
+                            _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
+                                "destino": "voluntario",
+                                "encontro_id": encontro_id,
+                                "login_vinculo": login_vinculo,
+                                "msg_type": "audio",
+                                "msg_id": msg_id,
+                            })
                         
-                            return data
-                        
-                        
-                        def _wa_download_media_bytes(media_url: str) -> bytes:
-                            if not media_url:
-                                raise HTTPException(400, "media_url ausente.")
-                        
-                            if not WHATSAPP_TOKEN:
-                                raise HTTPException(500, "WHATSAPP_TOKEN não configurado.")
-                        
-                            headers = {
-                                "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-                            }
-                        
-                            resp = requests.get(media_url, headers=headers, timeout=60)
-                        
-                            if not resp.ok:
-                                raise HTTPException(
-                                    status_code=500,
-                                    detail={
-                                        "erro": "Falha ao baixar mídia da Meta",
-                                        "status_code": resp.status_code,
-                                        "resposta_meta": resp.text,
-                                    },
-                                )
-                        
-                            return resp.content
-                        
+                            continue
                         
                         # =========================
                         # 🔥 FUNÇÃO PRINCIPAL AJUSTADA
