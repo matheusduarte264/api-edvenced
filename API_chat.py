@@ -1292,6 +1292,12 @@ def _wa_save_incoming_audio_from_meta(media_id: str, original_mime_type: Optiona
     with open(path_original, "wb") as f:
         f.write(audio_bytes)
 
+    _dbg("AUDIO_META_ORIGINAL_SALVO", {
+        "filename_original": filename_original,
+        "mime": mime,
+        "path": path_original,
+    })
+
     if ext in (".mp3", ".m4a", ".aac", ".wav"):
         return filename_original
 
@@ -1335,26 +1341,12 @@ def _wa_save_incoming_audio_from_meta(media_id: str, original_mime_type: Optiona
         _log_exc("Falha ao converter áudio Meta para m4a", e)
 
     return filename_original
-    # =========================
-    # Se falhar → mantém original (não quebra Android)
-    # =========================
-    if proc.returncode != 0 or not os.path.exists(final_path) or os.path.getsize(final_path) <= 0:
-        return temp_filename
-
-    # remove original
-    try:
-        os.remove(temp_path)
-    except Exception:
-        pass
-
-    return final_filename
 
 
 # =========================
 # STATUS / RESPOSTA META
 # =========================
 
-# ✅ JÁ EXISTIA
 def _meta_response_ok(resp: Optional[dict]) -> bool:
     """
     A Meta costuma retornar 'messages' em caso de sucesso.
@@ -1366,7 +1358,6 @@ def _meta_response_ok(resp: Optional[dict]) -> bool:
 # ERRO DE WHATSAPP NO ENCONTRO
 # =========================
 
-# ✅ JÁ EXISTIA
 def _set_whatsapp_error(cur, encontro_id: int, erro_obj):
     try:
         if isinstance(erro_obj, (dict, list)):
@@ -1383,7 +1374,6 @@ def _set_whatsapp_error(cur, encontro_id: int, erro_obj):
         _log_exc("Falha ao gravar whatsapp_ultimo_erro", e)
 
 
-# ✅ JÁ EXISTIA
 def _clear_whatsapp_error(cur, encontro_id: int):
     try:
         cur.execute("""
@@ -1393,7 +1383,6 @@ def _clear_whatsapp_error(cur, encontro_id: int):
         """, (int(encontro_id),))
     except Exception as e:
         _log_exc("Falha ao limpar whatsapp_ultimo_erro", e)
-
 
 # =========================
 # DISPARO DO PACOTE COMPLETO
