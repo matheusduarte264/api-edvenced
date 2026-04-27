@@ -1814,19 +1814,53 @@ def _forward_volunteer_text_to_whatsapp(
 # =========================
 # CHAT -> WHATSAPP (ÁUDIO)
 # =========================
+def _convert_audio_to_whatsapp_ogg(src_filename: str) -> str:
+    src_path = os.path.join(AUDIOS_DIR, src_filename)
+
+    if not os.path.exists(src_path):
+        raise HTTPException(404, f"Áudio não encontrado: {src_filename}")
+
+    base, _ = os.path.splitext(src_filename)
+    out_filename = f"{base}_whatsapp.ogg"
+    out_path = os.path.join(AUDIOS_DIR, out_filename)
+
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        return out_filename
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", src_path,
+        "-vn",
+        "-ac", "1",
+        "-ar", "48000",
+        "-c:a", "libopus",
+        "-b:a", "64k",
+        "-application", "voip",
+        "-f", "ogg",
+        out_path
+    ]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) <= 0:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "erro": "Falha ao converter áudio para OGG/Opus",
+                "src_filename": src_filename,
+                "stderr": (proc.stderr or "")[-3000:],
+            },
+        )
+
+    return out_filename
+
+
 def _forward_volunteer_audio_to_whatsapp(
     cur,
     encontro_id: int,
     filename: str
 ) -> Dict[str, Any]:
-    """
-    Envia ÁUDIO do voluntário/chat web para o WhatsApp do responsável.
-
-    Versão estável:
-    - NÃO converte o áudio aqui.
-    - Usa o arquivo original salvo pelo /mensagem/audio.
-    - Mantém o comportamento da API que já encaminhava para o WhatsApp.
-    """
     try:
         if not _wa_is_configured():
             return {"ok": False, "erro": "whatsapp_not_configured"}
@@ -1837,34 +1871,18 @@ def _forward_volunteer_audio_to_whatsapp(
         if not filename:
             return {"ok": False, "erro": "arquivo_audio_ausente"}
 
-        audio_path = os.path.join(AUDIOS_DIR, filename)
-
-        if not os.path.exists(audio_path):
-            return {
-                "ok": False,
-                "erro": "arquivo_audio_nao_encontrado",
-                "arquivo_audio": filename,
-                "path": audio_path
-            }
-
-        if os.path.getsize(audio_path) <= 0:
-            return {
-                "ok": False,
-                "erro": "arquivo_audio_vazio",
-                "arquivo_audio": filename,
-                "path": audio_path
-            }
-
         responsavel_whatsapp = _resolve_responsavel_whatsapp_by_encontro(
             cur,
             int(encontro_id)
         )
 
-        audio_url = _build_public_audio_url(filename)
+        filename_ogg = _convert_audio_to_whatsapp_ogg(filename)
+        audio_url = _build_public_audio_url(filename_ogg)
 
         _dbg("WHATSAPP_AUDIO_PRONTO", {
             "encontro_id": int(encontro_id),
             "audio_original": filename,
+            "audio_convertido": filename_ogg,
             "audio_url": audio_url,
             "to": _to_wa_number(responsavel_whatsapp),
         })
@@ -1879,6 +1897,7 @@ def _forward_volunteer_audio_to_whatsapp(
                 "ok": False,
                 "erro": "whatsapp_audio_meta_failed",
                 "audio_original": filename,
+                "audio_convertido": filename_ogg,
                 "audio_url": audio_url,
                 "meta": meta_resp
             }
@@ -1888,6 +1907,7 @@ def _forward_volunteer_audio_to_whatsapp(
             "tipo": "audio",
             "to": _to_wa_number(responsavel_whatsapp),
             "audio_original": filename,
+            "audio_convertido": filename_ogg,
             "audio_url": audio_url,
             "meta": meta_resp
         }
