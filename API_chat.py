@@ -1385,20 +1385,18 @@ def _clear_whatsapp_error(cur, encontro_id: int):
         _log_exc("Falha ao limpar whatsapp_ultimo_erro", e)
 
 # =========================
+# =========================
 # DISPARO DO PACOTE COMPLETO
 # =========================
 def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     """
-    Envia pacote completo ao responsável:
-    1) template aprovado
+    Envia pacote completo:
+    1) template
     2) localização
     3) foto
 
-    Regra:
-    - Não usa fallback emergencial agora.
-    - Só tenta enviar quando tipo, foto e localização existem.
-    - Tenta enviar os 3 itens.
-    - Depois da tentativa do pacote, libera o chat.
+    Compatível com Android/iPhone porque o envio é feito pela API da Meta.
+    Só marca como enviado se os 3 envios retornarem OK.
     """
     try:
         eid = int(encontro_id)
@@ -1489,6 +1487,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         )
 
         foto_url = f"{PUBLIC_BASE_URL}/media/fotos/{foto_arquivo}"
+        legenda = f"Tipo: {tipo_vulneravel} | Voluntário: {nome_voluntario_final}"
 
         _dbg("WHATSAPP_ONBOARDING_PRONTO", {
             "encontro_id": eid,
@@ -1502,6 +1501,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
         resultados = {}
 
+        # 1) TEMPLATE
         try:
             resultados["template"] = _wa_send_template(
                 to_number=responsavel_whatsapp,
@@ -1516,6 +1516,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "detail": repr(e),
             }
 
+        # 2) LOCALIZAÇÃO
         try:
             resultados["location"] = _wa_send_location(
                 to_number=responsavel_whatsapp,
@@ -1530,9 +1531,8 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "detail": repr(e),
             }
 
+        # 3) FOTO
         try:
-            legenda = f"Tipo: {tipo_vulneravel} | Voluntário: {nome_voluntario_final}"
-
             resultados["image"] = _wa_send_image_by_link(
                 to_number=responsavel_whatsapp,
                 image_url=foto_url,
@@ -1552,32 +1552,57 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
         pacote_ok = bool(template_ok and location_ok and image_ok)
 
-        erro_txt = None
-        if not pacote_ok:
-            erro_txt = json.dumps({
-                "template_ok": template_ok,
-                "location_ok": location_ok,
-                "image_ok": image_ok,
+        _dbg("WHATSAPP_ONBOARDING_RESULTADO", {
+            "encontro_id": eid,
+            "template_ok": template_ok,
+            "location_ok": location_ok,
+            "image_ok": image_ok,
+            "pacote_ok": pacote_ok,
+            "resultados": resultados,
+        })
+
+        if pacote_ok:
+            cur.execute("""
+                UPDATE encontros
+                SET onboarding_whatsapp_enviado=1,
+                    onboarding_whatsapp_enviado_em=NOW(),
+                    whatsapp_ultimo_erro=NULL
+                WHERE id=%s
+            """, (eid,))
+
+            return {
+                "ok": True,
+                "chat_liberado": True,
+                "template_ok": True,
+                "location_ok": True,
+                "image_ok": True,
                 "resultados": resultados,
                 "foto_url": foto_url,
                 "latitude": float(lat),
                 "longitude": float(lng),
-            }, ensure_ascii=False)[:5000]
+            }
+
+        erro_txt = json.dumps({
+            "erro": "pacote_whatsapp_incompleto",
+            "template_ok": template_ok,
+            "location_ok": location_ok,
+            "image_ok": image_ok,
+            "resultados": resultados,
+            "foto_url": foto_url,
+            "latitude": float(lat),
+            "longitude": float(lng),
+        }, ensure_ascii=False)[:5000]
 
         cur.execute("""
             UPDATE encontros
-            SET onboarding_whatsapp_enviado=1,
-                onboarding_whatsapp_enviado_em=NOW(),
+            SET onboarding_whatsapp_enviado=0,
                 whatsapp_ultimo_erro=%s
             WHERE id=%s
         """, (erro_txt, eid))
 
-        if pacote_ok:
-            _clear_whatsapp_error(cur, eid)
-
         return {
-            "ok": pacote_ok,
-            "chat_liberado": True,
+            "ok": False,
+            "chat_liberado": False,
             "template_ok": template_ok,
             "location_ok": location_ok,
             "image_ok": image_ok,
@@ -1616,7 +1641,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             pass
 
         return erro
-
 # =========================
 # FALLBACK - PERDA DE CONEXÃO DO VOLUNTÁRIO
 # =========================
@@ -1814,19 +1838,51 @@ def _forward_volunteer_text_to_whatsapp(
 # =========================
 # CHAT -> WHATSAPP (ÁUDIO)
 # =========================
+def _convert_audio_to_whatsapp_mp3(src_filename: str) -> str:
+    src_path = os.path.join(AUDIOS_DIR, src_filename)
+
+    if not os.path.exists(src_path):
+        raise HTTPException(404, f"Áudio não encontrado: {src_filename}")
+
+    base, _ = os.path.splitext(src_filename)
+    out_filename = f"{base}_whatsapp.mp3"
+    out_path = os.path.join(AUDIOS_DIR, out_filename)
+
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        return out_filename
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", src_path,
+        "-vn",
+        "-ac", "1",
+        "-ar", "44100",
+        "-c:a", "libmp3lame",
+        "-b:a", "128k",
+        out_path
+    ]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) <= 0:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "erro": "Falha ao converter áudio para MP3",
+                "src_filename": src_filename,
+                "stderr": (proc.stderr or "")[-3000:],
+            },
+        )
+
+    return out_filename
+
+
 def _forward_volunteer_audio_to_whatsapp(
     cur,
     encontro_id: int,
     filename: str
 ) -> Dict[str, Any]:
-    """
-    Envia ÁUDIO do voluntário/chat web para o WhatsApp do responsável.
-
-    Versão estável:
-    - NÃO converte o áudio aqui.
-    - Usa o arquivo original salvo pelo /mensagem/audio.
-    - Mantém o comportamento da API que já encaminhava para o WhatsApp.
-    """
     try:
         if not _wa_is_configured():
             return {"ok": False, "erro": "whatsapp_not_configured"}
@@ -1837,34 +1893,18 @@ def _forward_volunteer_audio_to_whatsapp(
         if not filename:
             return {"ok": False, "erro": "arquivo_audio_ausente"}
 
-        audio_path = os.path.join(AUDIOS_DIR, filename)
-
-        if not os.path.exists(audio_path):
-            return {
-                "ok": False,
-                "erro": "arquivo_audio_nao_encontrado",
-                "arquivo_audio": filename,
-                "path": audio_path
-            }
-
-        if os.path.getsize(audio_path) <= 0:
-            return {
-                "ok": False,
-                "erro": "arquivo_audio_vazio",
-                "arquivo_audio": filename,
-                "path": audio_path
-            }
-
         responsavel_whatsapp = _resolve_responsavel_whatsapp_by_encontro(
             cur,
             int(encontro_id)
         )
 
-        audio_url = _build_public_audio_url(filename)
+        filename_mp3 = _convert_audio_to_whatsapp_mp3(filename)
+        audio_url = _build_public_audio_url(filename_mp3)
 
         _dbg("WHATSAPP_AUDIO_PRONTO", {
             "encontro_id": int(encontro_id),
             "audio_original": filename,
+            "audio_convertido": filename_mp3,
             "audio_url": audio_url,
             "to": _to_wa_number(responsavel_whatsapp),
         })
@@ -1879,6 +1919,7 @@ def _forward_volunteer_audio_to_whatsapp(
                 "ok": False,
                 "erro": "whatsapp_audio_meta_failed",
                 "audio_original": filename,
+                "audio_convertido": filename_mp3,
                 "audio_url": audio_url,
                 "meta": meta_resp
             }
@@ -1888,6 +1929,7 @@ def _forward_volunteer_audio_to_whatsapp(
             "tipo": "audio",
             "to": _to_wa_number(responsavel_whatsapp),
             "audio_original": filename,
+            "audio_convertido": filename_mp3,
             "audio_url": audio_url,
             "meta": meta_resp
         }
@@ -2137,128 +2179,57 @@ def cadastrar_voluntario(payload: VoluntarioIn):
 
 # =========================
 # =========================
-# ENCONTRO / ONBOARDING
 # =========================
-@app.post("/encontro", status_code=201, tags=["comunicacao_app"])
-def registrar_encontro(payload: EncontroIn):
-    login_vinculo = _resolve_login_vinculo_from_payload(payload.login_vinculo, payload.id_pulseira)
-    nome_vol = (payload.nome_voluntario or "").strip() or "Voluntário"
-    vol_tel = _only_digits(payload.voluntario_telefone or payload.telefone_origem or "") or None
-
-    if login_vinculo:
-        cnx, cur = _open_cursor()
-        try:
-            pulseira_id = _ensure_pulseira(cur, login_vinculo)
-            voluntario_id = None
-            if vol_tel and _is_tel_valido_br(vol_tel):
-                info = _resolve_voluntario_por_telefone(cur, vol_tel)
-                if info:
-                    voluntario_id = info["id"]
-                else:
-                    cur.execute("INSERT INTO voluntarios (nome, telefone) VALUES (%s, %s)", (nome_vol, vol_tel))
-                    voluntario_id = int(cur.lastrowid)
-
-            encontro_id = _ensure_encontro(cur, pulseira_id, voluntario_id=voluntario_id)
-            _aprender_voluntario_no_encontro(cur, encontro_id, voluntario_id, nome_vol, vol_tel)
-            cnx.commit()
-
-            return {
-                "ok": True,
-                "id": int(encontro_id),
-                "encontro_id": int(encontro_id),
-                "login_vinculo": login_vinculo,
-                "nome_voluntario": nome_vol,
-                "voluntario_telefone": vol_tel,
-                "voluntario_id": int(voluntario_id) if voluntario_id else None,
-                "voluntario_presente": 1,
-                "status": "pendente",
-            }
-        except Exception as e:
-            cnx.rollback()
-            _log_exc("Erro em /encontro", e)
-            raise HTTPException(500, "Falha ao registrar encontro.")
-        finally:
-            cur.close()
-            cnx.close()
-
-    tel_vul = _only_digits(payload.telefone_vulneravel or "")
-    if not _is_tel_valido_br(tel_vul):
-        raise HTTPException(400, "telefone_vulneravel inválido e login_vinculo ausente.")
-
-    cnx, cur = _open_cursor()
-    try:
-        pulseira_id = _ensure_pulseira(cur, f"legacy_{tel_vul}")
-        responsavel_id = _resolve_responsavel_por_telefone(cur, tel_vul)
-        voluntario_id = None
-        if vol_tel and _is_tel_valido_br(vol_tel):
-            info = _resolve_voluntario_por_telefone(cur, vol_tel)
-            if info:
-                voluntario_id = info["id"]
-            else:
-                cur.execute("INSERT INTO voluntarios (nome, telefone) VALUES (%s, %s)", (nome_vol, vol_tel))
-                voluntario_id = int(cur.lastrowid)
-
-        encontro_id = _ensure_encontro(cur, pulseira_id, responsavel_id=responsavel_id, voluntario_id=voluntario_id)
-        _aprender_voluntario_no_encontro(cur, encontro_id, voluntario_id, nome_vol, vol_tel)
-        cnx.commit()
-
-        return {
-            "ok": True,
-            "id": int(encontro_id),
-            "encontro_id": int(encontro_id),
-            "telefone_vulneravel": tel_vul,
-            "nome_voluntario": nome_vol,
-            "voluntario_telefone": vol_tel,
-            "voluntario_id": int(voluntario_id) if voluntario_id else None,
-            "voluntario_presente": 1,
-            "status": "pendente",
-        }
-    except Exception as e:
-        cnx.rollback()
-        _log_exc("Erro em /encontro", e)
-        raise HTTPException(500, "Falha ao registrar encontro.")
-    finally:
-        cur.close()
-        cnx.close()
-
-
+# ENCONTRO / TIPO VULNERÁVEL
+# =========================
 @app.post("/encontro/tipo_vulneravel", tags=["comunicacao_app"])
 def encontro_tipo_vulneravel(payload: TipoVulneravelIn):
     tipo = (payload.tipo or "").strip().lower()
     if not tipo:
         raise HTTPException(400, "tipo vazio.")
 
-    login_vinculo = _resolve_login_vinculo_from_payload(payload.login_vinculo, payload.id_pulseira)
+    login_vinculo = _resolve_login_vinculo_from_payload(
+        payload.login_vinculo,
+        payload.id_pulseira
+    )
 
     cnx, cur = _open_cursor()
     try:
         encontro_id = payload.encontro_id
 
         if not encontro_id and login_vinculo:
-            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, login_vinculo) or _resolve_encontro_por_login_vinculo(cur, login_vinculo)
+            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, login_vinculo) \
+                or _resolve_encontro_por_login_vinculo(cur, login_vinculo)
 
         if not encontro_id:
             tel = _only_digits(payload.telefone_alvo or "")
             if not _is_tel_valido_br(tel):
                 raise HTTPException(400, "telefone_alvo inválido e login_vinculo ausente.")
-            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
+
+            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") \
+                or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
 
         if not encontro_id:
             raise HTTPException(404, "Encontro não encontrado.")
 
+        # 💾 SALVA O TIPO
         cur.execute("""
             UPDATE encontros
             SET tipo_vulneravel=%s
             WHERE id=%s
         """, (tipo, int(encontro_id)))
 
+        # ✅ COMMIT ANTES DO DISPARO
+        cnx.commit()
+
+        # 🔥 GATILHO WHATSAPP APÓS TIPO
         try:
             wa_result = _maybe_send_onboarding_to_whatsapp(cur, int(encontro_id))
             _dbg("WHATSAPP/TIPO_TRIGGER", wa_result)
+            cnx.commit()
         except Exception as e:
+            cnx.rollback()
             _log_exc("Erro ao tentar disparar WhatsApp após /encontro/tipo_vulneravel", e)
-
-        cnx.commit()
 
         return {
             "ok": True,
@@ -2266,6 +2237,7 @@ def encontro_tipo_vulneravel(payload: TipoVulneravelIn):
             "login_vinculo": login_vinculo,
             "tipo_vulneravel": tipo
         }
+
     except HTTPException:
         cnx.rollback()
         raise
@@ -2276,105 +2248,19 @@ def encontro_tipo_vulneravel(payload: TipoVulneravelIn):
     finally:
         cur.close()
         cnx.close()
-
-
-@app.get("/encontro/pending", tags=["comunicacao_app"])
-def buscar_encontro_pendente(
-    telefone_vulneravel: Optional[str] = Query(default=None),
-    telefone: Optional[str] = Query(default=None),
-    login_vinculo: Optional[str] = Query(default=None),
-    id_pulseira: Optional[str] = Query(default=None),
-):
-    lv = _resolve_login_vinculo_from_payload(login_vinculo, id_pulseira)
-
-    cnx, cur = _open_cursor()
-    try:
-        encontro_id = None
-        if lv:
-            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) or _resolve_encontro_por_login_vinculo(cur, lv)
-        else:
-            tel = _only_digits((telefone_vulneravel or telefone or ""))
-            if _is_tel_valido_br(tel):
-                encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
-
-        if not encontro_id:
-            return {"has_event": False}
-
-        row = _get_encontro_core(cur, int(encontro_id))
-        if not row:
-            return {"has_event": False}
-
-        loc = _get_ultima_localizacao_para_encontro(cur, int(encontro_id))
-
-        (
-            eid,
-            pulseira_id,
-            responsavel_id,
-            voluntario_id,
-            created_at,
-            tipo_vulneravel,
-            foto_arquivo,
-            status,
-            voluntario_presente,
-            envio_de_localizacao,
-            onboarding_whatsapp_enviado,
-            onboarding_whatsapp_enviado_em,
-            whatsapp_ultimo_erro,
-            login_vinculo_db,
-            nome_vulneravel,
-            nome_responsavel,
-            telefone_responsavel,
-            responsavel_whatsapp,
-            nome_voluntario,
-            voluntario_telefone
-        ) = row
-
-        return {
-            "has_event": True,
-            "id": int(eid),
-            "encontro_id": int(eid),
-            "login_vinculo": login_vinculo_db,
-            "id_pulseira": login_vinculo_db,
-            "pulseira_id": int(pulseira_id) if pulseira_id else None,
-            "responsavel_id": int(responsavel_id) if responsavel_id else None,
-            "nome_responsavel": nome_responsavel,
-            "telefone_responsavel": telefone_responsavel,
-            "responsavel_whatsapp": responsavel_whatsapp,
-            "nome_vulneravel": nome_vulneravel,
-            "voluntario_id": int(voluntario_id) if voluntario_id else None,
-            "nome_voluntario": nome_voluntario or "Voluntário",
-            "voluntario_telefone": voluntario_telefone,
-            "foto_url": f"/media/fotos/{foto_arquivo}" if foto_arquivo else None,
-            "voluntario_presente": int(voluntario_presente or 0),
-            "status": status or "pendente",
-            "envio_de_localizacao": int(envio_de_localizacao or 0),
-            "onboarding_whatsapp_enviado": int(onboarding_whatsapp_enviado or 0),
-            "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S") if created_at else None,
-            "tipo_vulneravel": tipo_vulneravel or None,
-            "latitude": float(loc[0]) if loc else None,
-            "longitude": float(loc[1]) if loc else None,
-            "accuracy": loc[2] if loc else None,
-            "location_created_at": loc[3].strftime("%Y-%m-%d %H:%M:%S") if (loc and loc[3]) else None,
-        }
-    except Exception as e:
-        _log_exc("Erro em /encontro/pending", e)
-        return {"has_event": False, "error": "db_error", "detail": repr(e)}
-    finally:
-        cur.close()
-        cnx.close()
         
 # =========================
 # LOCALIZAÇÃO (FLUXO CORRETO)
 # =========================
-
 @app.post("/localizacao", tags=["localizacao"])
 def salvar_localizacao(payload: LocalizacaoIn):
     """
     Recebe localização do voluntário ou usuário
     e salva vinculando corretamente ao encontro.
+    Depois tenta disparar o pacote WhatsApp:
+    template + localização + foto.
     """
 
-    # 🔎 Resolver login_vinculo (PRINCIPAL)
     lv = _resolve_login_vinculo_from_payload(
         payload.login_vinculo,
         payload.id_pulseira
@@ -2385,36 +2271,29 @@ def salvar_localizacao(payload: LocalizacaoIn):
     try:
         encontro_id = payload.encontro_id
 
-        # 🔥 PRIORIDADE 1 → login_vinculo
         if not encontro_id and lv:
             encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) \
                 or _resolve_encontro_por_login_vinculo(cur, lv)
 
-        # 🔥 PRIORIDADE 2 → telefone (fallback)
         if not encontro_id and payload.telefone_vulneravel:
             tel = _only_digits(payload.telefone_vulneravel)
             if _is_tel_valido_br(tel):
                 encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") \
                     or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
 
-        # ❌ Sem encontro → erro
         if not encontro_id:
             raise HTTPException(404, "Encontro não encontrado.")
 
-        # 🔎 valida encontro
         row = _get_encontro_core(cur, int(encontro_id))
         if not row:
             raise HTTPException(404, "Encontro não encontrado.")
 
         login_vinculo_db = row[13]
 
-        # 👤 origem
-        origem = (payload.origem or "").strip().lower()
-
-        voluntario_nome = payload.voluntario_nome
+        origem = (payload.origem or "voluntario").strip().lower()
+        voluntario_nome = (payload.voluntario_nome or "").strip() or None
         voluntario_telefone = _only_digits(payload.voluntario_telefone or "") or None
 
-        # 💾 salva localização
         cur.execute("""
             INSERT INTO localizacoes (
                 encontro_id,
@@ -2438,14 +2317,12 @@ def salvar_localizacao(payload: LocalizacaoIn):
             payload.timestamp
         ))
 
-        # 🔥 LIBERA FLAG DE LOCALIZAÇÃO
         cur.execute("""
             UPDATE encontros
             SET envio_de_localizacao=1
             WHERE id=%s
         """, (int(encontro_id),))
 
-        # 🔥 aprende voluntário (IMPORTANTE PRO WHATSAPP)
         if origem in ("voluntario", "web"):
             _aprender_voluntario_no_encontro(
                 cur,
@@ -2455,7 +2332,18 @@ def salvar_localizacao(payload: LocalizacaoIn):
                 voluntario_telefone
             )
 
+        # ✅ COMMIT ANTES DO DISPARO
+        # garante que a localização já esteja gravada no banco
         cnx.commit()
+
+        # 🔥 GATILHO WHATSAPP APÓS LOCALIZAÇÃO
+        try:
+            wa_result = _maybe_send_onboarding_to_whatsapp(cur, int(encontro_id))
+            _dbg("WHATSAPP/LOCALIZACAO_TRIGGER", wa_result)
+            cnx.commit()
+        except Exception as e:
+            cnx.rollback()
+            _log_exc("Erro ao tentar disparar WhatsApp após /localizacao", e)
 
         return {
             "ok": True,
@@ -2476,8 +2364,6 @@ def salvar_localizacao(payload: LocalizacaoIn):
         cur.close()
         cnx.close()
 
-
-
 # =========================
 # FOTO
 # =========================
@@ -2495,17 +2381,21 @@ async def receber_foto(
     cnx, cur = _open_cursor()
     try:
         origem_lc = (origem or "voluntario").strip().lower()
-        if origem_lc not in ("voluntario", "app"):
-            raise HTTPException(400, "origem inválida. Use 'voluntario' ou 'app'.")
+
+        if origem_lc not in ("voluntario", "app", "web"):
+            raise HTTPException(400, "origem inválida. Use 'voluntario', 'web' ou 'app'.")
 
         lv = _resolve_login_vinculo_from_payload(login_vinculo, id_pulseira)
+
         if not encontro_id and lv:
-            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) or _resolve_encontro_por_login_vinculo(cur, lv)
+            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) \
+                or _resolve_encontro_por_login_vinculo(cur, lv)
 
         if not encontro_id and telefone_alvo:
             tel = _only_digits(telefone_alvo)
             if _is_tel_valido_br(tel):
-                encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
+                encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") \
+                    or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
 
         if not encontro_id:
             raise HTTPException(404, "Encontro não encontrado.")
@@ -2519,11 +2409,14 @@ async def receber_foto(
 
         filename = _unique_photo_name(foto.filename or "captura.png")
         path = os.path.join(FOTOS_DIR, filename)
+
         with open(path, "wb") as f:
             shutil.copyfileobj(foto.file, f)
 
         tel_origem = _only_digits(telefone_origem or "") or None
-        nome = (nome_origem or "").strip() or ("Voluntário" if origem_lc == "voluntario" else "Usuário")
+        nome = (nome_origem or "").strip() or (
+            "Voluntário" if origem_lc in ("voluntario", "web") else "Usuário"
+        )
 
         cur.execute("""
             INSERT INTO mensagens
@@ -2536,8 +2429,8 @@ async def receber_foto(
             "foto",
             filename,
             telefone_alvo_final,
-            "entregue" if origem_lc == "voluntario" else "pendente",
-            None if origem_lc == "voluntario" else "voluntario",
+            "entregue" if origem_lc in ("voluntario", "web") else "pendente",
+            None if origem_lc in ("voluntario", "web") else "voluntario",
             tel_origem,
             nome,
             origem_lc
@@ -2551,15 +2444,21 @@ async def receber_foto(
             WHERE id=%s
         """, (filename, int(encontro_id)))
 
-        if origem_lc == "voluntario":
-            _aprender_voluntario_no_encontro(cur, int(encontro_id), None, nome, tel_origem)
+        if origem_lc in ("voluntario", "web"):
+            _aprender_voluntario_no_encontro(
+                cur,
+                int(encontro_id),
+                None,
+                nome,
+                tel_origem
+            )
 
-        if origem_lc == "voluntario":
-            try:
-                wa_result = _maybe_send_onboarding_to_whatsapp(cur, int(encontro_id))
-                _dbg("WHATSAPP/FOTO_TRIGGER", wa_result)
-            except Exception as e:
-                _log_exc("Erro ao tentar disparar WhatsApp após /foto", e)
+        # 🔥 GATILHO WHATSAPP APÓS FOTO
+        try:
+            wa_result = _maybe_send_onboarding_to_whatsapp(cur, int(encontro_id))
+            _dbg("WHATSAPP/FOTO_TRIGGER", wa_result)
+        except Exception as e:
+            _log_exc("Erro ao tentar disparar WhatsApp após /foto", e)
 
         cnx.commit()
 
