@@ -1385,6 +1385,7 @@ def _clear_whatsapp_error(cur, encontro_id: int):
         _log_exc("Falha ao limpar whatsapp_ultimo_erro", e)
 
 # =========================
+# =========================
 # DISPARO DO PACOTE COMPLETO
 # =========================
 def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
@@ -1394,11 +1395,10 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     2) localização
     3) foto
 
-    Regra:
-    - Não usa fallback emergencial agora.
-    - Só tenta enviar quando tipo, foto e localização existem.
-    - Tenta enviar os 3 itens.
-    - Depois da tentativa do pacote, libera o chat.
+    REGRA AJUSTADA:
+    - Só marca onboarding_whatsapp_enviado=1 se template + localização + foto enviarem com sucesso.
+    - Se algum item falhar, grava o erro e permite nova tentativa depois.
+    - Evita travar o fluxo mandando só template.
     """
     try:
         eid = int(encontro_id)
@@ -1555,6 +1555,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         erro_txt = None
         if not pacote_ok:
             erro_txt = json.dumps({
+                "erro": "pacote_whatsapp_incompleto",
                 "template_ok": template_ok,
                 "location_ok": location_ok,
                 "image_ok": image_ok,
@@ -1564,20 +1565,25 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "longitude": float(lng),
             }, ensure_ascii=False)[:5000]
 
-        cur.execute("""
-            UPDATE encontros
-            SET onboarding_whatsapp_enviado=1,
-                onboarding_whatsapp_enviado_em=NOW(),
-                whatsapp_ultimo_erro=%s
-            WHERE id=%s
-        """, (erro_txt, eid))
-
         if pacote_ok:
-            _clear_whatsapp_error(cur, eid)
+            cur.execute("""
+                UPDATE encontros
+                SET onboarding_whatsapp_enviado=1,
+                    onboarding_whatsapp_enviado_em=NOW(),
+                    whatsapp_ultimo_erro=NULL
+                WHERE id=%s
+            """, (eid,))
+        else:
+            cur.execute("""
+                UPDATE encontros
+                SET onboarding_whatsapp_enviado=0,
+                    whatsapp_ultimo_erro=%s
+                WHERE id=%s
+            """, (erro_txt, eid))
 
         return {
             "ok": pacote_ok,
-            "chat_liberado": True,
+            "chat_liberado": pacote_ok,
             "template_ok": template_ok,
             "location_ok": location_ok,
             "image_ok": image_ok,
@@ -1616,7 +1622,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             pass
 
         return erro
-
 # =========================
 # FALLBACK - PERDA DE CONEXÃO DO VOLUNTÁRIO
 # =========================
