@@ -2179,9 +2179,122 @@ def cadastrar_voluntario(payload: VoluntarioIn):
 
 # =========================
 # =========================
+# ENCONTRO / ONBOARDING
 # =========================
-# ENCONTRO / TIPO VULNERÁVEL
-# =========================
+@app.post("/encontro", status_code=201, tags=["comunicacao_app"])
+def registrar_encontro(payload: EncontroIn):
+    login_vinculo = _resolve_login_vinculo_from_payload(payload.login_vinculo, payload.id_pulseira)
+    nome_vol = (payload.nome_voluntario or "").strip() or "Voluntário"
+    vol_tel = _only_digits(payload.voluntario_telefone or payload.telefone_origem or "") or None
+
+    if login_vinculo:
+        cnx, cur = _open_cursor()
+        try:
+            pulseira_id = _ensure_pulseira(cur, login_vinculo)
+            voluntario_id = None
+
+            if vol_tel and _is_tel_valido_br(vol_tel):
+                info = _resolve_voluntario_por_telefone(cur, vol_tel)
+                if info:
+                    voluntario_id = info["id"]
+                else:
+                    cur.execute(
+                        "INSERT INTO voluntarios (nome, telefone) VALUES (%s, %s)",
+                        (nome_vol, vol_tel)
+                    )
+                    voluntario_id = int(cur.lastrowid)
+
+            encontro_id = _ensure_encontro(cur, pulseira_id, voluntario_id=voluntario_id)
+
+            _aprender_voluntario_no_encontro(
+                cur,
+                encontro_id,
+                voluntario_id,
+                nome_vol,
+                vol_tel
+            )
+
+            cnx.commit()
+
+            return {
+                "ok": True,
+                "id": int(encontro_id),
+                "encontro_id": int(encontro_id),
+                "login_vinculo": login_vinculo,
+                "nome_voluntario": nome_vol,
+                "voluntario_telefone": vol_tel,
+                "voluntario_id": int(voluntario_id) if voluntario_id else None,
+                "voluntario_presente": 1,
+                "status": "pendente",
+            }
+
+        except Exception as e:
+            cnx.rollback()
+            _log_exc("Erro em /encontro", e)
+            raise HTTPException(500, "Falha ao registrar encontro.")
+        finally:
+            cur.close()
+            cnx.close()
+
+    tel_vul = _only_digits(payload.telefone_vulneravel or "")
+    if not _is_tel_valido_br(tel_vul):
+        raise HTTPException(400, "telefone_vulneravel inválido e login_vinculo ausente.")
+
+    cnx, cur = _open_cursor()
+    try:
+        pulseira_id = _ensure_pulseira(cur, f"legacy_{tel_vul}")
+        responsavel_id = _resolve_responsavel_por_telefone(cur, tel_vul)
+        voluntario_id = None
+
+        if vol_tel and _is_tel_valido_br(vol_tel):
+            info = _resolve_voluntario_por_telefone(cur, vol_tel)
+            if info:
+                voluntario_id = info["id"]
+            else:
+                cur.execute(
+                    "INSERT INTO voluntarios (nome, telefone) VALUES (%s, %s)",
+                    (nome_vol, vol_tel)
+                )
+                voluntario_id = int(cur.lastrowid)
+
+        encontro_id = _ensure_encontro(
+            cur,
+            pulseira_id,
+            responsavel_id=responsavel_id,
+            voluntario_id=voluntario_id
+        )
+
+        _aprender_voluntario_no_encontro(
+            cur,
+            encontro_id,
+            voluntario_id,
+            nome_vol,
+            vol_tel
+        )
+
+        cnx.commit()
+
+        return {
+            "ok": True,
+            "id": int(encontro_id),
+            "encontro_id": int(encontro_id),
+            "telefone_vulneravel": tel_vul,
+            "nome_voluntario": nome_vol,
+            "voluntario_telefone": vol_tel,
+            "voluntario_id": int(voluntario_id) if voluntario_id else None,
+            "voluntario_presente": 1,
+            "status": "pendente",
+        }
+
+    except Exception as e:
+        cnx.rollback()
+        _log_exc("Erro em /encontro", e)
+        raise HTTPException(500, "Falha ao registrar encontro.")
+    finally:
+        cur.close()
+        cnx.close()
+
+
 @app.post("/encontro/tipo_vulneravel", tags=["comunicacao_app"])
 def encontro_tipo_vulneravel(payload: TipoVulneravelIn):
     tipo = (payload.tipo or "").strip().lower()
@@ -2212,7 +2325,6 @@ def encontro_tipo_vulneravel(payload: TipoVulneravelIn):
         if not encontro_id:
             raise HTTPException(404, "Encontro não encontrado.")
 
-        # 💾 SALVA O TIPO
         cur.execute("""
             UPDATE encontros
             SET tipo_vulneravel=%s
@@ -2248,6 +2360,102 @@ def encontro_tipo_vulneravel(payload: TipoVulneravelIn):
     finally:
         cur.close()
         cnx.close()
+
+
+@app.get("/encontro/pending", tags=["comunicacao_app"])
+def buscar_encontro_pendente(
+    telefone_vulneravel: Optional[str] = Query(default=None),
+    telefone: Optional[str] = Query(default=None),
+    login_vinculo: Optional[str] = Query(default=None),
+    id_pulseira: Optional[str] = Query(default=None),
+):
+    lv = _resolve_login_vinculo_from_payload(login_vinculo, id_pulseira)
+
+    cnx, cur = _open_cursor()
+    try:
+        encontro_id = None
+
+        if lv:
+            encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, lv) \
+                or _resolve_encontro_por_login_vinculo(cur, lv)
+        else:
+            tel = _only_digits((telefone_vulneravel or telefone or ""))
+            if _is_tel_valido_br(tel):
+                encontro_id = _resolve_encontro_pendente_por_login_vinculo(cur, f"legacy_{tel}") \
+                    or _resolve_encontro_por_login_vinculo(cur, f"legacy_{tel}")
+
+        if not encontro_id:
+            return {"has_event": False}
+
+        row = _get_encontro_core(cur, int(encontro_id))
+        if not row:
+            return {"has_event": False}
+
+        loc = _get_ultima_localizacao_para_encontro(cur, int(encontro_id))
+
+        (
+            eid,
+            pulseira_id,
+            responsavel_id,
+            voluntario_id,
+            created_at,
+            tipo_vulneravel,
+            foto_arquivo,
+            status,
+            voluntario_presente,
+            envio_de_localizacao,
+            onboarding_whatsapp_enviado,
+            onboarding_whatsapp_enviado_em,
+            whatsapp_ultimo_erro,
+            login_vinculo_db,
+            nome_vulneravel,
+            nome_responsavel,
+            telefone_responsavel,
+            responsavel_whatsapp,
+            nome_voluntario,
+            voluntario_telefone
+        ) = row
+
+        return {
+            "has_event": True,
+            "id": int(eid),
+            "encontro_id": int(eid),
+            "login_vinculo": login_vinculo_db,
+            "id_pulseira": login_vinculo_db,
+            "pulseira_id": int(pulseira_id) if pulseira_id else None,
+            "responsavel_id": int(responsavel_id) if responsavel_id else None,
+            "nome_responsavel": nome_responsavel,
+            "telefone_responsavel": telefone_responsavel,
+            "responsavel_whatsapp": responsavel_whatsapp,
+            "nome_vulneravel": nome_vulneravel,
+            "voluntario_id": int(voluntario_id) if voluntario_id else None,
+            "nome_voluntario": nome_voluntario or "Voluntário",
+            "voluntario_telefone": voluntario_telefone,
+            "foto_url": f"/media/fotos/{foto_arquivo}" if foto_arquivo else None,
+            "voluntario_presente": int(voluntario_presente or 0),
+            "status": status or "pendente",
+            "envio_de_localizacao": int(envio_de_localizacao or 0),
+            "onboarding_whatsapp_enviado": int(onboarding_whatsapp_enviado or 0),
+            "whatsapp_ultimo_erro": whatsapp_ultimo_erro,
+            "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S") if created_at else None,
+            "tipo_vulneravel": tipo_vulneravel or None,
+            "latitude": float(loc[0]) if loc else None,
+            "longitude": float(loc[1]) if loc else None,
+            "accuracy": loc[2] if loc else None,
+            "location_created_at": loc[3].strftime("%Y-%m-%d %H:%M:%S") if (loc and loc[3]) else None,
+        }
+
+    except Exception as e:
+        _log_exc("Erro em /encontro/pending", e)
+        return {
+            "has_event": False,
+            "error": "db_error",
+            "detail": repr(e)
+        }
+    finally:
+        cur.close()
+        cnx.close()
+
         
 # =========================
 # LOCALIZAÇÃO (FLUXO CORRETO)
