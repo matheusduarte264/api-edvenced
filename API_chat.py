@@ -1409,11 +1409,16 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     - Só tenta quando tipo + localização + foto existem.
     - Envia template primeiro.
     - Depois envia localização e foto.
-    - Libera o chat se localização e foto forem enviadas.
-    - Não trava o chat somente porque o template falhou.
+    - Só considera pacote completo se os 3 enviarem.
+    - Se o chat já foi liberado antes, mas o template falhou,
+      tenta reenviar apenas o template.
     """
     try:
         eid = int(encontro_id)
+
+        _dbg("WHATSAPP_TRIGGER_CHAMADO", {
+            "encontro_id": eid
+        })
 
         if not _wa_is_configured():
             erro = {"ok": False, "erro": "whatsapp_not_configured"}
@@ -1426,6 +1431,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 e.tipo_vulneravel,
                 e.foto_arquivo,
                 e.onboarding_whatsapp_enviado,
+                e.whatsapp_ultimo_erro,
                 r.nome,
                 COALESCE(r.whatsapp, r.telefone) AS responsavel_whatsapp,
                 v.nome,
@@ -1449,14 +1455,12 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             tipo_vulneravel,
             foto_arquivo,
             onboarding_enviado,
+            whatsapp_ultimo_erro,
             nome_responsavel,
             responsavel_whatsapp,
             nome_voluntario,
             nome_vulneravel,
         ) = row
-
-        if int(onboarding_enviado or 0) == 1:
-            return {"ok": True, "skipped": "already_sent"}
 
         if not responsavel_whatsapp:
             erro = {"ok": False, "erro": "responsavel_whatsapp_ausente"}
@@ -1503,6 +1507,77 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         foto_url = f"{PUBLIC_BASE_URL}/media/fotos/{foto_arquivo}"
         legenda = f"Tipo: {tipo_vulneravel} | Voluntário: {nome_voluntario_final}"
 
+        # Se já liberou antes, mas o template falhou, tenta mandar só o template
+        if int(onboarding_enviado or 0) == 1:
+            deve_reenviar_template = False
+
+            try:
+                if whatsapp_ultimo_erro:
+                    erro_obj = json.loads(whatsapp_ultimo_erro)
+                    deve_reenviar_template = erro_obj.get("template_ok") is False
+            except Exception:
+                deve_reenviar_template = False
+
+            if not deve_reenviar_template:
+                return {"ok": True, "skipped": "already_sent"}
+
+            resultados = {}
+
+            try:
+                resultados["template_retry"] = _wa_send_template(
+                    to_number=responsavel_whatsapp,
+                    nome=nome_vulneravel_final,
+                    tipo=tipo_vulneravel,
+                    voluntario=nome_voluntario_final,
+                )
+            except Exception as e:
+                resultados["template_retry"] = {
+                    "ok": False,
+                    "erro": "template_retry_exception",
+                    "detail": repr(e),
+                }
+
+            template_ok = _meta_response_ok(resultados.get("template_retry"))
+
+            _dbg("WHATSAPP_TEMPLATE_RETRY_RESULTADO", {
+                "encontro_id": eid,
+                "template_ok": template_ok,
+                "resultados": resultados,
+            })
+
+            if template_ok:
+                cur.execute("""
+                    UPDATE encontros
+                    SET whatsapp_ultimo_erro=NULL
+                    WHERE id=%s
+                """, (eid,))
+                return {
+                    "ok": True,
+                    "chat_liberado": True,
+                    "template_ok": True,
+                    "skipped": "already_sent_but_template_retried",
+                    "resultados": resultados,
+                }
+
+            erro_txt = json.dumps({
+                "erro": "template_retry_failed",
+                "template_ok": False,
+                "resultados": resultados,
+            }, ensure_ascii=False)[:5000]
+
+            cur.execute("""
+                UPDATE encontros
+                SET whatsapp_ultimo_erro=%s
+                WHERE id=%s
+            """, (erro_txt, eid))
+
+            return {
+                "ok": False,
+                "chat_liberado": True,
+                "template_ok": False,
+                "resultados": resultados,
+            }
+
         _dbg("WHATSAPP_ONBOARDING_PRONTO", {
             "encontro_id": eid,
             "responsavel_whatsapp": responsavel_whatsapp,
@@ -1532,7 +1607,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
         template_ok = _meta_response_ok(resultados.get("template"))
 
-        # pequena pausa para a Meta processar a primeira mensagem
         time.sleep(1)
 
         # 2) LOCALIZAÇÃO
@@ -1552,7 +1626,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
         location_ok = _meta_response_ok(resultados.get("location"))
 
-        # retry da localização
         if not location_ok:
             time.sleep(1)
             try:
@@ -1589,7 +1662,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
         image_ok = _meta_response_ok(resultados.get("image"))
 
-        # retry da foto
         if not image_ok:
             time.sleep(1)
             try:
@@ -1607,10 +1679,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                     "foto_url": foto_url,
                 }
 
-        # pacote completo ideal
         pacote_ok = bool(template_ok and location_ok and image_ok)
-
-        # regra prática: se localização + foto foram enviadas, libera chat
         chat_liberado = bool(location_ok and image_ok)
 
         _dbg("WHATSAPP_ONBOARDING_RESULTADO", {
