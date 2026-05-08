@@ -1084,25 +1084,35 @@ def _get_ultima_localizacao_para_encontro(cur, encontro_id: int):
 # =========================
 # CONFIG / NOMES DE TEMPLATE
 # =========================
-# ✅ JÁ EXISTIA
+
+# 🔥 AJUSTADO
 def _wa_template_name() -> str:
-    return os.getenv("WHATSAPP_TEMPLATE_NAME", "alerta_de_localizacao").strip()
+    """
+    Nome do template aprovado no Meta.
+    Usa variável de ambiente, com fallback correto.
+    """
+    return os.getenv("WHATSAPP_TEMPLATE_NAME", "alerta_pulseira_edvenced").strip()
 
 
-# ✅ JÁ EXISTIA
+# 🔥 MANTIDO (já estava correto)
 def _wa_template_lang() -> str:
+    """
+    Idioma do template.
+    """
     return os.getenv("WHATSAPP_TEMPLATE_LANG", "pt_BR").strip()
 
 
-# ✅ JÁ EXISTIA
+# 🔥 MANTIDO (sem mudança)
 def _wa_is_configured() -> bool:
+    """
+    Verifica se WhatsApp está configurado corretamente.
+    """
     return bool(
         WHATSAPP_ENABLED
         and WHATSAPP_TOKEN
         and WHATSAPP_PHONE_NUMBER_ID
         and PUBLIC_BASE_URL
     )
-
 
 # =========================
 # ENVIO SIMPLES PARA WHATSAPP
