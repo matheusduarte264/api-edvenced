@@ -1407,18 +1407,13 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
     Regra:
     - Só tenta quando tipo + localização + foto existem.
-    - Envia template primeiro.
-    - Depois envia localização e foto.
-    - Só considera pacote completo se os 3 enviarem.
-    - Se o chat já foi liberado antes, mas o template falhou,
-      tenta reenviar apenas o template.
+    - Se já enviou tudo sem erro, não repete.
+    - Se já liberou chat mas ficou erro salvo, tenta reenviar o pacote completo.
     """
     try:
         eid = int(encontro_id)
 
-        _dbg("WHATSAPP_TRIGGER_CHAMADO", {
-            "encontro_id": eid
-        })
+        _dbg("WHATSAPP_TRIGGER_CHAMADO", {"encontro_id": eid})
 
         if not _wa_is_configured():
             erro = {"ok": False, "erro": "whatsapp_not_configured"}
@@ -1461,6 +1456,10 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             nome_voluntario,
             nome_vulneravel,
         ) = row
+
+        # ✅ Se já enviou completo e não tem erro, não repete
+        if int(onboarding_enviado or 0) == 1 and not whatsapp_ultimo_erro:
+            return {"ok": True, "skipped": "already_sent"}
 
         if not responsavel_whatsapp:
             erro = {"ok": False, "erro": "responsavel_whatsapp_ausente"}
@@ -1507,77 +1506,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         foto_url = f"{PUBLIC_BASE_URL}/media/fotos/{foto_arquivo}"
         legenda = f"Tipo: {tipo_vulneravel} | Voluntário: {nome_voluntario_final}"
 
-        # Se já liberou antes, mas o template falhou, tenta mandar só o template
-        if int(onboarding_enviado or 0) == 1:
-            deve_reenviar_template = False
-
-            try:
-                if whatsapp_ultimo_erro:
-                    erro_obj = json.loads(whatsapp_ultimo_erro)
-                    deve_reenviar_template = erro_obj.get("template_ok") is False
-            except Exception:
-                deve_reenviar_template = False
-
-            if not deve_reenviar_template:
-                return {"ok": True, "skipped": "already_sent"}
-
-            resultados = {}
-
-            try:
-                resultados["template_retry"] = _wa_send_template(
-                    to_number=responsavel_whatsapp,
-                    nome=nome_vulneravel_final,
-                    tipo=tipo_vulneravel,
-                    voluntario=nome_voluntario_final,
-                )
-            except Exception as e:
-                resultados["template_retry"] = {
-                    "ok": False,
-                    "erro": "template_retry_exception",
-                    "detail": repr(e),
-                }
-
-            template_ok = _meta_response_ok(resultados.get("template_retry"))
-
-            _dbg("WHATSAPP_TEMPLATE_RETRY_RESULTADO", {
-                "encontro_id": eid,
-                "template_ok": template_ok,
-                "resultados": resultados,
-            })
-
-            if template_ok:
-                cur.execute("""
-                    UPDATE encontros
-                    SET whatsapp_ultimo_erro=NULL
-                    WHERE id=%s
-                """, (eid,))
-                return {
-                    "ok": True,
-                    "chat_liberado": True,
-                    "template_ok": True,
-                    "skipped": "already_sent_but_template_retried",
-                    "resultados": resultados,
-                }
-
-            erro_txt = json.dumps({
-                "erro": "template_retry_failed",
-                "template_ok": False,
-                "resultados": resultados,
-            }, ensure_ascii=False)[:5000]
-
-            cur.execute("""
-                UPDATE encontros
-                SET whatsapp_ultimo_erro=%s
-                WHERE id=%s
-            """, (erro_txt, eid))
-
-            return {
-                "ok": False,
-                "chat_liberado": True,
-                "template_ok": False,
-                "resultados": resultados,
-            }
-
         _dbg("WHATSAPP_ONBOARDING_PRONTO", {
             "encontro_id": eid,
             "responsavel_whatsapp": responsavel_whatsapp,
@@ -1586,11 +1514,12 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "latitude": float(lat),
             "longitude": float(lng),
             "foto_url": foto_url,
+            "reenviando_por_erro": bool(whatsapp_ultimo_erro),
         })
 
         resultados = {}
 
-        # 1) TEMPLATE PRIMEIRO
+        # 1) TEMPLATE
         try:
             resultados["template"] = _wa_send_template(
                 to_number=responsavel_whatsapp,
@@ -1680,7 +1609,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 }
 
         pacote_ok = bool(template_ok and location_ok and image_ok)
-        chat_liberado = bool(location_ok and image_ok)
+        chat_liberado = bool(template_ok or location_ok or image_ok)
 
         _dbg("WHATSAPP_ONBOARDING_RESULTADO", {
             "encontro_id": eid,
@@ -1707,21 +1636,17 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "longitude": float(lng),
             }, ensure_ascii=False)[:5000]
 
-        if chat_liberado:
-            cur.execute("""
-                UPDATE encontros
-                SET onboarding_whatsapp_enviado=1,
-                    onboarding_whatsapp_enviado_em=NOW(),
-                    whatsapp_ultimo_erro=%s
-                WHERE id=%s
-            """, (erro_txt, eid))
-        else:
-            cur.execute("""
-                UPDATE encontros
-                SET onboarding_whatsapp_enviado=0,
-                    whatsapp_ultimo_erro=%s
-                WHERE id=%s
-            """, (erro_txt, eid))
+        cur.execute("""
+            UPDATE encontros
+            SET onboarding_whatsapp_enviado=%s,
+                onboarding_whatsapp_enviado_em=NOW(),
+                whatsapp_ultimo_erro=%s
+            WHERE id=%s
+        """, (
+            1 if chat_liberado else 0,
+            None if pacote_ok else erro_txt,
+            eid
+        ))
 
         return {
             "ok": pacote_ok,
