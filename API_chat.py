@@ -1396,6 +1396,7 @@ def _clear_whatsapp_error(cur, encontro_id: int):
 
 # =========================
 # =========================
+# =========================
 # DISPARO DO PACOTE COMPLETO
 # =========================
 def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
@@ -1409,6 +1410,8 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     - Só tenta quando tipo + localização + foto existem.
     - Se já enviou completo sem erro, não repete.
     - Se houve erro parcial, tenta reenviar.
+    - Recheca os dados no banco antes de enviar.
+    - Usa pausas e retry para estabilizar celulares lentos.
     - Chat só libera quando localização + foto forem enviadas.
     """
 
@@ -1424,25 +1427,77 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             _set_whatsapp_error(cur, eid, erro)
             return erro
 
-        cur.execute("""
-            SELECT
-                e.id,
-                e.tipo_vulneravel,
-                e.foto_arquivo,
-                e.onboarding_whatsapp_enviado,
-                e.whatsapp_ultimo_erro,
-                r.nome,
-                COALESCE(r.whatsapp, r.telefone) AS responsavel_whatsapp,
-                v.nome,
-                p.nome_dependente
-            FROM encontros e
-            LEFT JOIN responsaveis r ON r.id = e.responsavel_id
-            LEFT JOIN voluntarios v ON v.id = e.voluntario_id
-            LEFT JOIN pulseiras_qr p ON p.id = e.pulseira_id
-            WHERE e.id=%s
-            LIMIT 1
-        """, (eid,))
-        row = cur.fetchone()
+        # =========================
+        # RECHECAGEM DO BANCO
+        # =========================
+        row = None
+        loc = None
+
+        for tentativa in range(1, 4):
+            cur.execute("""
+                SELECT
+                    e.id,
+                    e.tipo_vulneravel,
+                    e.foto_arquivo,
+                    e.onboarding_whatsapp_enviado,
+                    e.whatsapp_ultimo_erro,
+                    r.nome,
+                    COALESCE(r.whatsapp, r.telefone) AS responsavel_whatsapp,
+                    v.nome,
+                    p.nome_dependente
+                FROM encontros e
+                LEFT JOIN responsaveis r ON r.id = e.responsavel_id
+                LEFT JOIN voluntarios v ON v.id = e.voluntario_id
+                LEFT JOIN pulseiras_qr p ON p.id = e.pulseira_id
+                WHERE e.id=%s
+                LIMIT 1
+            """, (eid,))
+            row = cur.fetchone()
+
+            cur.execute("""
+                SELECT latitude, longitude, voluntario_nome
+                FROM localizacoes
+                WHERE encontro_id=%s
+                  AND latitude IS NOT NULL
+                  AND longitude IS NOT NULL
+                ORDER BY id DESC
+                LIMIT 1
+            """, (eid,))
+            loc = cur.fetchone()
+
+            if row:
+                (
+                    _id,
+                    tipo_vulneravel,
+                    foto_arquivo,
+                    onboarding_enviado,
+                    whatsapp_ultimo_erro,
+                    nome_responsavel,
+                    responsavel_whatsapp,
+                    nome_voluntario,
+                    nome_vulneravel,
+                ) = row
+
+                dados_prontos = bool(
+                    tipo_vulneravel and
+                    foto_arquivo and
+                    loc and
+                    loc[0] is not None and
+                    loc[1] is not None and
+                    responsavel_whatsapp
+                )
+
+                if dados_prontos:
+                    break
+
+            _dbg("WHATSAPP_AGUARDANDO_DADOS", {
+                "encontro_id": eid,
+                "tentativa": tentativa,
+                "tem_row": bool(row),
+                "tem_loc": bool(loc),
+            })
+
+            time.sleep(1)
 
         if not row:
             erro = {"ok": False, "erro": "encontro_not_found"}
@@ -1461,7 +1516,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             nome_vulneravel,
         ) = row
 
-        # ✅ já enviado corretamente
         if int(onboarding_enviado or 0) == 1 and not whatsapp_ultimo_erro:
             return {
                 "ok": True,
@@ -1487,18 +1541,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "ok": False,
                 "skipped": "foto_arquivo_ausente"
             }
-
-        cur.execute("""
-            SELECT latitude, longitude, voluntario_nome
-            FROM localizacoes
-            WHERE encontro_id=%s
-              AND latitude IS NOT NULL
-              AND longitude IS NOT NULL
-            ORDER BY id DESC
-            LIMIT 1
-        """, (eid,))
-
-        loc = cur.fetchone()
 
         if not loc:
             return {
@@ -1540,6 +1582,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "latitude": float(lat),
             "longitude": float(lng),
             "foto_url": foto_url,
+            "reenviando_por_erro": bool(whatsapp_ultimo_erro),
         })
 
         resultados = {}
@@ -1561,11 +1604,9 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "detail": repr(e),
             }
 
-        template_ok = _meta_response_ok(
-            resultados.get("template")
-        )
+        template_ok = _meta_response_ok(resultados.get("template"))
 
-        time.sleep(1)
+        time.sleep(2)
 
         # =========================
         # 2) LOCALIZAÇÃO
@@ -1584,11 +1625,26 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "detail": repr(e),
             }
 
-        location_ok = _meta_response_ok(
-            resultados.get("location")
-        )
+        location_ok = _meta_response_ok(resultados.get("location"))
 
-        time.sleep(1)
+        if not location_ok:
+            time.sleep(2)
+            try:
+                resultados["location_retry"] = _wa_send_location(
+                    to_number=responsavel_whatsapp,
+                    latitude=float(lat),
+                    longitude=float(lng),
+                    nome="Localização do encontro",
+                )
+                location_ok = _meta_response_ok(resultados.get("location_retry"))
+            except Exception as e:
+                resultados["location_retry"] = {
+                    "ok": False,
+                    "erro": "location_retry_exception",
+                    "detail": repr(e),
+                }
+
+        time.sleep(2)
 
         # =========================
         # 3) FOTO
@@ -1607,18 +1663,31 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "foto_url": foto_url,
             }
 
-        image_ok = _meta_response_ok(
-            resultados.get("image")
-        )
+        image_ok = _meta_response_ok(resultados.get("image"))
 
-        # ✅ pacote completo
+        if not image_ok:
+            time.sleep(2)
+            try:
+                resultados["image_retry"] = _wa_send_image_by_link(
+                    to_number=responsavel_whatsapp,
+                    image_url=foto_url,
+                    caption=legenda,
+                )
+                image_ok = _meta_response_ok(resultados.get("image_retry"))
+            except Exception as e:
+                resultados["image_retry"] = {
+                    "ok": False,
+                    "erro": "image_retry_exception",
+                    "detail": repr(e),
+                    "foto_url": foto_url,
+                }
+
         pacote_ok = bool(
             template_ok and
             location_ok and
             image_ok
         )
 
-        # ✅ CHAT SÓ LIBERA COM FOTO + LOCALIZAÇÃO
         chat_liberado = bool(
             location_ok and image_ok
         )
@@ -1648,10 +1717,14 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         cur.execute("""
             UPDATE encontros
             SET onboarding_whatsapp_enviado=%s,
-                onboarding_whatsapp_enviado_em=NOW(),
+                onboarding_whatsapp_enviado_em=CASE
+                    WHEN %s = 1 THEN NOW()
+                    ELSE onboarding_whatsapp_enviado_em
+                END,
                 whatsapp_ultimo_erro=%s
             WHERE id=%s
         """, (
+            1 if chat_liberado else 0,
             1 if chat_liberado else 0,
             None if pacote_ok else erro_txt,
             eid
