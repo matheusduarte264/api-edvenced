@@ -1404,21 +1404,18 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     1) localização
     2) foto
     3) template
+    4) backup em texto com links
 
-    Regra:
-    - Só tenta quando tipo + localização + foto existem.
-    - Prioriza mídia primeiro porque era o fluxo mais estável.
-    - Template vai por último para não bloquear/atrasar mídia.
-    - Usa pausas maiores e retry.
-    - Chat só libera quando localização + foto forem enviadas.
+    Objetivo:
+    - Funcionar em Android antigo, Android novo e iPhone.
+    - Não depender apenas do card de mídia do WhatsApp.
+    - Se localização/foto demorarem ou falharem visualmente, o responsável ainda recebe os links.
     """
 
     try:
         eid = int(encontro_id)
 
-        _dbg("WHATSAPP_TRIGGER_CHAMADO", {
-            "encontro_id": eid
-        })
+        _dbg("WHATSAPP_TRIGGER_CHAMADO", {"encontro_id": eid})
 
         if not _wa_is_configured():
             erro = {"ok": False, "erro": "whatsapp_not_configured"}
@@ -1513,10 +1510,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         ) = row
 
         if int(onboarding_enviado or 0) == 1 and not whatsapp_ultimo_erro:
-            return {
-                "ok": True,
-                "skipped": "already_sent"
-            }
+            return {"ok": True, "skipped": "already_sent"}
 
         if not responsavel_whatsapp:
             erro = {"ok": False, "erro": "responsavel_whatsapp_ausente"}
@@ -1550,11 +1544,9 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         )
 
         foto_url = f"{PUBLIC_BASE_URL}/media/fotos/{foto_arquivo}"
+        maps_url = f"https://maps.google.com/?q={float(lat)},{float(lng)}"
 
-        legenda = (
-            f"Tipo: {tipo_vulneravel} | "
-            f"Voluntário: {nome_voluntario_final}"
-        )
+        legenda = f"Tipo: {tipo_vulneravel} | Voluntário: {nome_voluntario_final}"
 
         _dbg("WHATSAPP_ONBOARDING_PRONTO", {
             "encontro_id": eid,
@@ -1563,14 +1555,14 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "latitude": float(lat),
             "longitude": float(lng),
             "foto_url": foto_url,
-            "ordem": "location_image_template",
-            "reenviando_por_erro": bool(whatsapp_ultimo_erro),
+            "maps_url": maps_url,
+            "ordem": "location_image_template_backup",
         })
 
         resultados = {}
 
         # =========================
-        # 1) LOCALIZAÇÃO PRIMEIRO
+        # 1) LOCALIZAÇÃO
         # =========================
         location_ok = False
 
@@ -1600,11 +1592,10 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
             time.sleep(4)
 
-        # pausa maior para aparelho/WhatsApp estabilizar mídia
         time.sleep(5)
 
         # =========================
-        # 2) FOTO DEPOIS
+        # 2) FOTO
         # =========================
         image_ok = False
 
@@ -1634,11 +1625,10 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
             time.sleep(4)
 
-        # pausa antes do template
         time.sleep(5)
 
         # =========================
-        # 3) TEMPLATE POR ÚLTIMO
+        # 3) TEMPLATE
         # =========================
         template_ok = False
 
@@ -1668,19 +1658,51 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
             time.sleep(4)
 
+        time.sleep(3)
+
+        # =========================
+        # 4) BACKUP TEXTO COM LINKS
+        # =========================
+        backup_text_ok = False
+
+        try:
+            texto_backup = (
+                "📍 Dados do encontro:\n\n"
+                f"Tipo: {tipo_vulneravel}\n"
+                f"Voluntário: {nome_voluntario_final}\n\n"
+                f"Localização:\n{maps_url}\n\n"
+                f"Foto:\n{foto_url}\n\n"
+                "Caso o mapa ou a imagem não apareçam no WhatsApp, use os links acima."
+            )
+
+            resultados["backup_text"] = _wa_send_text(
+                to_number=responsavel_whatsapp,
+                texto=texto_backup
+            )
+
+            backup_text_ok = _meta_response_ok(resultados.get("backup_text"))
+
+        except Exception as e:
+            resultados["backup_text_exception"] = {
+                "ok": False,
+                "erro": "backup_text_exception",
+                "detail": repr(e),
+            }
+
         pacote_ok = bool(template_ok and location_ok and image_ok)
 
-        # ✅ chat só libera com mídia entregue
-        chat_liberado = bool(location_ok and image_ok)
+        # Libera se mídia foi aceita OU se o backup com links chegou.
+        chat_liberado = bool((location_ok and image_ok) or backup_text_ok)
 
         _dbg("WHATSAPP_ONBOARDING_RESULTADO", {
             "encontro_id": eid,
             "template_ok": template_ok,
             "location_ok": location_ok,
             "image_ok": image_ok,
+            "backup_text_ok": backup_text_ok,
             "pacote_ok": pacote_ok,
             "chat_liberado": chat_liberado,
-            "ordem": "location_image_template",
+            "ordem": "location_image_template_backup",
             "resultados": resultados,
         })
 
@@ -1692,10 +1714,12 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "template_ok": template_ok,
                 "location_ok": location_ok,
                 "image_ok": image_ok,
+                "backup_text_ok": backup_text_ok,
                 "chat_liberado": chat_liberado,
-                "ordem": "location_image_template",
+                "ordem": "location_image_template_backup",
                 "resultados": resultados,
                 "foto_url": foto_url,
+                "maps_url": maps_url,
                 "latitude": float(lat),
                 "longitude": float(lng),
             }, ensure_ascii=False)[:5000]
@@ -1722,9 +1746,11 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "template_ok": template_ok,
             "location_ok": location_ok,
             "image_ok": image_ok,
-            "ordem": "location_image_template",
+            "backup_text_ok": backup_text_ok,
+            "ordem": "location_image_template_backup",
             "resultados": resultados,
             "foto_url": foto_url,
+            "maps_url": maps_url,
             "latitude": float(lat),
             "longitude": float(lng),
         }
