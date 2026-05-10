@@ -1396,22 +1396,20 @@ def _clear_whatsapp_error(cur, encontro_id: int):
 
 # =========================
 # =========================
-# =========================
 # DISPARO DO PACOTE COMPLETO
 # =========================
 def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     """
     Envia pacote completo:
-    1) template
-    2) localização
-    3) foto
+    1) localização
+    2) foto
+    3) template
 
     Regra:
     - Só tenta quando tipo + localização + foto existem.
-    - Se já enviou completo sem erro, não repete.
-    - Se houve erro parcial, tenta reenviar.
-    - Recheca os dados no banco antes de enviar.
-    - Usa pausas e retry para estabilizar celulares lentos.
+    - Prioriza mídia primeiro porque era o fluxo mais estável.
+    - Template vai por último para não bloquear/atrasar mídia.
+    - Usa pausas maiores e retry.
     - Chat só libera quando localização + foto forem enviadas.
     """
 
@@ -1427,13 +1425,13 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             _set_whatsapp_error(cur, eid, erro)
             return erro
 
-        # =========================
-        # RECHECAGEM DO BANCO
-        # =========================
         row = None
         loc = None
 
-        for tentativa in range(1, 4):
+        # =========================
+        # RECHECAGEM DO BANCO
+        # =========================
+        for tentativa in range(1, 6):
             cur.execute("""
                 SELECT
                     e.id,
@@ -1478,16 +1476,14 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                     nome_vulneravel,
                 ) = row
 
-                dados_prontos = bool(
-                    tipo_vulneravel and
-                    foto_arquivo and
-                    loc and
-                    loc[0] is not None and
-                    loc[1] is not None and
-                    responsavel_whatsapp
-                )
-
-                if dados_prontos:
+                if (
+                    tipo_vulneravel
+                    and foto_arquivo
+                    and loc
+                    and loc[0] is not None
+                    and loc[1] is not None
+                    and responsavel_whatsapp
+                ):
                     break
 
             _dbg("WHATSAPP_AGUARDANDO_DADOS", {
@@ -1497,7 +1493,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "tem_loc": bool(loc),
             })
 
-            time.sleep(1)
+            time.sleep(2)
 
         if not row:
             erro = {"ok": False, "erro": "encontro_not_found"}
@@ -1523,38 +1519,23 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             }
 
         if not responsavel_whatsapp:
-            erro = {
-                "ok": False,
-                "erro": "responsavel_whatsapp_ausente"
-            }
+            erro = {"ok": False, "erro": "responsavel_whatsapp_ausente"}
             _set_whatsapp_error(cur, eid, erro)
             return erro
 
         if not tipo_vulneravel:
-            return {
-                "ok": False,
-                "skipped": "tipo_vulneravel_ausente"
-            }
+            return {"ok": False, "skipped": "tipo_vulneravel_ausente"}
 
         if not foto_arquivo:
-            return {
-                "ok": False,
-                "skipped": "foto_arquivo_ausente"
-            }
+            return {"ok": False, "skipped": "foto_arquivo_ausente"}
 
         if not loc:
-            return {
-                "ok": False,
-                "skipped": "localizacao_ausente"
-            }
+            return {"ok": False, "skipped": "localizacao_ausente"}
 
         lat, lng, voluntario_nome_loc = loc
 
         if lat is None or lng is None:
-            return {
-                "ok": False,
-                "skipped": "latitude_longitude_ausente"
-            }
+            return {"ok": False, "skipped": "latitude_longitude_ausente"}
 
         nome_voluntario_final = (
             (nome_voluntario or "").strip()
@@ -1582,115 +1563,115 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "latitude": float(lat),
             "longitude": float(lng),
             "foto_url": foto_url,
+            "ordem": "location_image_template",
             "reenviando_por_erro": bool(whatsapp_ultimo_erro),
         })
 
         resultados = {}
 
         # =========================
-        # 1) TEMPLATE
+        # 1) LOCALIZAÇÃO PRIMEIRO
         # =========================
-        try:
-            resultados["template"] = _wa_send_template(
-                to_number=responsavel_whatsapp,
-                nome=nome_vulneravel_final,
-                tipo=tipo_vulneravel,
-                voluntario=nome_voluntario_final,
-            )
-        except Exception as e:
-            resultados["template"] = {
-                "ok": False,
-                "erro": "template_exception",
-                "detail": repr(e),
-            }
+        location_ok = False
 
-        template_ok = _meta_response_ok(resultados.get("template"))
-
-        time.sleep(2)
-
-        # =========================
-        # 2) LOCALIZAÇÃO
-        # =========================
-        try:
-            resultados["location"] = _wa_send_location(
-                to_number=responsavel_whatsapp,
-                latitude=float(lat),
-                longitude=float(lng),
-                nome="Localização do encontro",
-            )
-        except Exception as e:
-            resultados["location"] = {
-                "ok": False,
-                "erro": "location_exception",
-                "detail": repr(e),
-            }
-
-        location_ok = _meta_response_ok(resultados.get("location"))
-
-        if not location_ok:
-            time.sleep(2)
+        for tentativa in range(1, 4):
             try:
-                resultados["location_retry"] = _wa_send_location(
+                chave = "location" if tentativa == 1 else f"location_retry_{tentativa}"
+
+                resultados[chave] = _wa_send_location(
                     to_number=responsavel_whatsapp,
                     latitude=float(lat),
                     longitude=float(lng),
                     nome="Localização do encontro",
                 )
-                location_ok = _meta_response_ok(resultados.get("location_retry"))
+
+                location_ok = _meta_response_ok(resultados.get(chave))
+
+                if location_ok:
+                    break
+
             except Exception as e:
-                resultados["location_retry"] = {
+                resultados[f"location_exception_{tentativa}"] = {
                     "ok": False,
-                    "erro": "location_retry_exception",
+                    "erro": "location_exception",
+                    "tentativa": tentativa,
                     "detail": repr(e),
                 }
 
-        time.sleep(2)
+            time.sleep(4)
+
+        # pausa maior para aparelho/WhatsApp estabilizar mídia
+        time.sleep(5)
 
         # =========================
-        # 3) FOTO
+        # 2) FOTO DEPOIS
         # =========================
-        try:
-            resultados["image"] = _wa_send_image_by_link(
-                to_number=responsavel_whatsapp,
-                image_url=foto_url,
-                caption=legenda,
-            )
-        except Exception as e:
-            resultados["image"] = {
-                "ok": False,
-                "erro": "image_exception",
-                "detail": repr(e),
-                "foto_url": foto_url,
-            }
+        image_ok = False
 
-        image_ok = _meta_response_ok(resultados.get("image"))
-
-        if not image_ok:
-            time.sleep(2)
+        for tentativa in range(1, 4):
             try:
-                resultados["image_retry"] = _wa_send_image_by_link(
+                chave = "image" if tentativa == 1 else f"image_retry_{tentativa}"
+
+                resultados[chave] = _wa_send_image_by_link(
                     to_number=responsavel_whatsapp,
                     image_url=foto_url,
                     caption=legenda,
                 )
-                image_ok = _meta_response_ok(resultados.get("image_retry"))
+
+                image_ok = _meta_response_ok(resultados.get(chave))
+
+                if image_ok:
+                    break
+
             except Exception as e:
-                resultados["image_retry"] = {
+                resultados[f"image_exception_{tentativa}"] = {
                     "ok": False,
-                    "erro": "image_retry_exception",
+                    "erro": "image_exception",
+                    "tentativa": tentativa,
                     "detail": repr(e),
                     "foto_url": foto_url,
                 }
 
-        pacote_ok = bool(
-            template_ok and
-            location_ok and
-            image_ok
-        )
+            time.sleep(4)
 
-        chat_liberado = bool(
-            location_ok and image_ok
-        )
+        # pausa antes do template
+        time.sleep(5)
+
+        # =========================
+        # 3) TEMPLATE POR ÚLTIMO
+        # =========================
+        template_ok = False
+
+        for tentativa in range(1, 3):
+            try:
+                chave = "template" if tentativa == 1 else f"template_retry_{tentativa}"
+
+                resultados[chave] = _wa_send_template(
+                    to_number=responsavel_whatsapp,
+                    nome=nome_vulneravel_final,
+                    tipo=tipo_vulneravel,
+                    voluntario=nome_voluntario_final,
+                )
+
+                template_ok = _meta_response_ok(resultados.get(chave))
+
+                if template_ok:
+                    break
+
+            except Exception as e:
+                resultados[f"template_exception_{tentativa}"] = {
+                    "ok": False,
+                    "erro": "template_exception",
+                    "tentativa": tentativa,
+                    "detail": repr(e),
+                }
+
+            time.sleep(4)
+
+        pacote_ok = bool(template_ok and location_ok and image_ok)
+
+        # ✅ chat só libera com mídia entregue
+        chat_liberado = bool(location_ok and image_ok)
 
         _dbg("WHATSAPP_ONBOARDING_RESULTADO", {
             "encontro_id": eid,
@@ -1699,6 +1680,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "image_ok": image_ok,
             "pacote_ok": pacote_ok,
             "chat_liberado": chat_liberado,
+            "ordem": "location_image_template",
             "resultados": resultados,
         })
 
@@ -1711,7 +1693,11 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "location_ok": location_ok,
                 "image_ok": image_ok,
                 "chat_liberado": chat_liberado,
+                "ordem": "location_image_template",
                 "resultados": resultados,
+                "foto_url": foto_url,
+                "latitude": float(lat),
+                "longitude": float(lng),
             }, ensure_ascii=False)[:5000]
 
         cur.execute("""
@@ -1736,6 +1722,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "template_ok": template_ok,
             "location_ok": location_ok,
             "image_ok": image_ok,
+            "ordem": "location_image_template",
             "resultados": resultados,
             "foto_url": foto_url,
             "latitude": float(lat),
@@ -1743,7 +1730,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         }
 
     except HTTPException as e:
-
         erro = {
             "ok": False,
             "erro": "http_exception",
@@ -1758,7 +1744,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         return erro
 
     except Exception as e:
-
         _log_exc("Falha ao enviar onboarding para WhatsApp", e)
 
         erro = {
