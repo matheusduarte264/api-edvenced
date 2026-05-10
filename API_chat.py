@@ -1407,9 +1407,8 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
     Regra:
     - Só tenta quando tipo + localização + foto existem.
-    - Não marca como enviado se chegar só template.
-    - Só libera chat quando localização + foto forem enviadas.
-    - Se houver erro salvo, tenta reenviar o pacote completo.
+    - Se já enviou tudo sem erro, não repete.
+    - Se já liberou chat mas ficou erro salvo, tenta reenviar o pacote completo.
     """
     try:
         eid = int(encontro_id)
@@ -1458,7 +1457,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             nome_vulneravel,
         ) = row
 
-        # Só ignora se já enviou completo SEM erro salvo
+        # ✅ Se já enviou completo e não tem erro, não repete
         if int(onboarding_enviado or 0) == 1 and not whatsapp_ultimo_erro:
             return {"ok": True, "skipped": "already_sent"}
 
@@ -1610,11 +1609,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 }
 
         pacote_ok = bool(template_ok and location_ok and image_ok)
-
-        # IMPORTANTE:
-        # não libera se chegou só template.
-        # só libera se localização + foto chegaram.
-        chat_liberado = bool(location_ok and image_ok)
+        chat_liberado = bool(template_ok or location_ok or image_ok)
 
         _dbg("WHATSAPP_ONBOARDING_RESULTADO", {
             "encontro_id": eid,
@@ -1644,14 +1639,10 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         cur.execute("""
             UPDATE encontros
             SET onboarding_whatsapp_enviado=%s,
-                onboarding_whatsapp_enviado_em=CASE
-                    WHEN %s = 1 THEN NOW()
-                    ELSE onboarding_whatsapp_enviado_em
-                END,
+                onboarding_whatsapp_enviado_em=NOW(),
                 whatsapp_ultimo_erro=%s
             WHERE id=%s
         """, (
-            1 if chat_liberado else 0,
             1 if chat_liberado else 0,
             None if pacote_ok else erro_txt,
             eid
