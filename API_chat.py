@@ -2322,6 +2322,30 @@ def cadastrar_voluntario(payload: VoluntarioIn):
 
 # =========================
 # =========================
+# DISPARO WHATSAPP EM BACKGROUND
+# =========================
+def _disparar_onboarding_whatsapp_background(encontro_id: int):
+    """
+    Dispara o pacote WhatsApp em segundo plano.
+    Evita travar o front após selecionar o tipo.
+    """
+    cnx, cur = _open_cursor()
+    try:
+        wa_result = _maybe_send_onboarding_to_whatsapp(cur, int(encontro_id))
+        _dbg("WHATSAPP/BACKGROUND_RESULTADO", wa_result)
+        cnx.commit()
+    except Exception as e:
+        cnx.rollback()
+        _log_exc("Erro no disparo WhatsApp em background", e)
+    finally:
+        try:
+            cur.close()
+            cnx.close()
+        except Exception:
+            pass
+
+
+# =========================
 # ENCONTRO / ONBOARDING
 # =========================
 @app.post("/encontro", status_code=201, tags=["comunicacao_app"])
@@ -2474,23 +2498,30 @@ def encontro_tipo_vulneravel(payload: TipoVulneravelIn):
             WHERE id=%s
         """, (tipo, int(encontro_id)))
 
-        # ✅ COMMIT ANTES DO DISPARO
+        # ✅ commit rápido para o front não ficar preso
         cnx.commit()
 
-        # 🔥 GATILHO WHATSAPP APÓS TIPO
+        # 🔥 WhatsApp em segundo plano
         try:
-            wa_result = _maybe_send_onboarding_to_whatsapp(cur, int(encontro_id))
-            _dbg("WHATSAPP/TIPO_TRIGGER", wa_result)
-            cnx.commit()
+            threading.Thread(
+                target=_disparar_onboarding_whatsapp_background,
+                args=(int(encontro_id),),
+                daemon=True
+            ).start()
+
+            _dbg("WHATSAPP/TIPO_TRIGGER_BACKGROUND_START", {
+                "encontro_id": int(encontro_id)
+            })
+
         except Exception as e:
-            cnx.rollback()
-            _log_exc("Erro ao tentar disparar WhatsApp após /encontro/tipo_vulneravel", e)
+            _log_exc("Erro ao iniciar WhatsApp em background após tipo_vulneravel", e)
 
         return {
             "ok": True,
             "encontro_id": int(encontro_id),
             "login_vinculo": login_vinculo,
-            "tipo_vulneravel": tipo
+            "tipo_vulneravel": tipo,
+            "whatsapp_background": True
         }
 
     except HTTPException:
