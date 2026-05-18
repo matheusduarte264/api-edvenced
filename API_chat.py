@@ -1692,6 +1692,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     - Não trava o front.
     - Se algum item falhar, salva erro.
     - Só pula envio se já foi enviado sem erro.
+    - Se faltar localização/foto/template, inicia retry em background.
     """
 
     try:
@@ -1885,6 +1886,30 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         if pacote_ok:
             _clear_whatsapp_error(cur, eid)
 
+        # =========================
+        # INICIA RETRY DE MÍDIAS PENDENTES
+        # =========================
+        if not pacote_ok and erro_txt:
+            try:
+                threading.Thread(
+                    target=_retry_whatsapp_midias_pendentes,
+                    args=(int(eid),),
+                    daemon=True
+                ).start()
+
+                _dbg("WHATSAPP_RETRY_MIDIAS_START", {
+                    "encontro_id": int(eid),
+                    "template_ok": template_ok,
+                    "location_ok": location_ok,
+                    "image_ok": image_ok,
+                })
+
+            except Exception as e:
+                _log_exc(
+                    "Erro ao iniciar retry de mídias pendentes",
+                    e
+                )
+
         _dbg("WHATSAPP_ONBOARDING_RESULTADO", {
             "encontro_id": eid,
             "template_ok": template_ok,
@@ -1940,27 +1965,6 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
 
         return erro
 
-# =========================
-# INICIA RETRY DE MÍDIAS PENDENTES
-# =========================
-if not pacote_ok:
-    try:
-
-        threading.Thread(
-            target=_retry_whatsapp_midias_pendentes,
-            args=(int(eid),),
-            daemon=True
-        ).start()
-
-        _dbg("WHATSAPP_RETRY_MIDIAS_START", {
-            "encontro_id": int(eid)
-        })
-
-    except Exception as e:
-        _log_exc(
-            "Erro ao iniciar retry de mídias pendentes",
-            e
-        )
 # =========================
 # FALLBACK - PERDA DE CONEXÃO DO VOLUNTÁRIO
 # =========================
