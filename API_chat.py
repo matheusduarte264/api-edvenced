@@ -1398,225 +1398,30 @@ def _clear_whatsapp_error(cur, encontro_id: int):
 # =========================
 # RETRY DE MÍDIAS PENDENTES
 # =========================
-def _retry_whatsapp_midias_pendentes(cur, encontro_id: int):
+def _retry_whatsapp_midias_pendentes(encontro_id: int):
+    """
+    Tenta reenviar somente o que ficou pendente:
+    - localização
+    - foto
+    - template, se necessário
+
+    Roda em background para não travar o chat/front.
+    """
+
+    cnx, cur = _open_cursor()
 
     try:
-
         eid = int(encontro_id)
 
-        cur.execute("""
-            SELECT
-                e.whatsapp_ultimo_erro,
-                e.foto_arquivo,
-                e.tipo_vulneravel,
-                COALESCE(r.whatsapp, r.telefone) AS responsavel_whatsapp,
-                v.nome,
-                p.nome_dependente
-            FROM encontros e
-            LEFT JOIN responsaveis r ON r.id = e.responsavel_id
-            LEFT JOIN voluntarios v ON v.id = e.voluntario_id
-            LEFT JOIN pulseiras_qr p ON p.id = e.pulseira_id
-            WHERE e.id=%s
-            LIMIT 1
-        """, (eid,))
-
-        row = cur.fetchone()
-
-        if not row:
-            return
-
-        (
-            whatsapp_ultimo_erro,
-            foto_arquivo,
-            tipo_vulneravel,
-            responsavel_whatsapp,
-            nome_voluntario,
-            nome_vulneravel,
-        ) = row
-
-        if not whatsapp_ultimo_erro:
-            return
-
-        try:
-            erro_obj = json.loads(whatsapp_ultimo_erro)
-        except Exception:
-            return
-
-        retry_location = erro_obj.get("location_ok") is False
-        retry_image = erro_obj.get("image_ok") is False
-
-        if not retry_location and not retry_image:
-            return
-
-        cur.execute("""
-            SELECT latitude, longitude
-            FROM localizacoes
-            WHERE encontro_id=%s
-              AND latitude IS NOT NULL
-              AND longitude IS NOT NULL
-            ORDER BY id DESC
-            LIMIT 1
-        """, (eid,))
-
-        loc = cur.fetchone()
-
-        lat = None
-        lng = None
-
-        if loc:
-            lat, lng = loc
-
-        resultados_retry = {}
-
-        # =========================
-        # RETRY LOCALIZAÇÃO
-        # =========================
-        if retry_location and lat is not None and lng is not None:
-
-            try:
-
-                resultados_retry["location_retry"] = _wa_send_text(
-                    to_number=responsavel_whatsapp,
-                    text=(
-                        "📍 Localização enviada pelo voluntário:\n\n"
-                        f"https://maps.google.com/?q={lat},{lng}"
-                    )
-                )
-
-                retry_location = not _meta_response_ok(
-                    resultados_retry["location_retry"]
-                )
-
-            except Exception as e:
-
-                resultados_retry["location_retry"] = {
-                    "ok": False,
-                    "erro": "location_retry_exception",
-                    "detail": repr(e),
-                }
-
-        # =========================
-        # RETRY FOTO
-        # =========================
-        if retry_image and foto_arquivo:
-
-            try:
-
-                foto_url = (
-                    f"{PUBLIC_BASE_URL}/media/fotos/{foto_arquivo}"
-                )
-
-                legenda = (
-                    "📸 Foto enviada pelo voluntário\n\n"
-                    f"Tipo: {tipo_vulneravel}\n"
-                    f"Voluntário: {nome_voluntario or 'Voluntário'}"
-                )
-
-                resultados_retry["image_retry"] = (
-                    _wa_send_image_by_link(
-                        to_number=responsavel_whatsapp,
-                        image_url=foto_url,
-                        caption=legenda,
-                    )
-                )
-
-                retry_image = not _meta_response_ok(
-                    resultados_retry["image_retry"]
-                )
-
-            except Exception as e:
-
-                resultados_retry["image_retry"] = {
-                    "ok": False,
-                    "erro": "image_retry_exception",
-                    "detail": repr(e),
-                }
-
-        # =========================
-        # FINAL
-        # =========================
-        pacote_ok = (
-            retry_location is False
-            and
-            retry_image is False
-        )
-
-        if pacote_ok:
-
-            cur.execute("""
-                UPDATE encontros
-                SET onboarding_whatsapp_enviado=1,
-                    onboarding_whatsapp_enviado_em=NOW(),
-                    whatsapp_ultimo_erro=NULL
-                WHERE id=%s
-            """, (eid,))
-
-        else:
-
-            novo_erro = json.dumps({
-
-                "location_ok": not retry_location,
-                "image_ok": not retry_image,
-
-                "retry_location": retry_location,
-                "retry_image": retry_image,
-
-                "resultados_retry": resultados_retry,
-
-            }, ensure_ascii=False)[:5000]
-
-            cur.execute("""
-                UPDATE encontros
-                SET whatsapp_ultimo_erro=%s
-                WHERE id=%s
-            """, (novo_erro, eid))
-
-        _dbg("WHATSAPP_RETRY_RESULTADO", {
-
-            "encontro_id": eid,
-
-            "retry_location_restante": retry_location,
-            "retry_image_restante": retry_image,
-
-            "pacote_ok": pacote_ok,
-
-            "resultados_retry": resultados_retry,
-        })
-
-    except Exception as e:
-
-        _log_exc(
-            "Erro no retry de mídias WhatsApp",
-            e
-        )
-
-
-# =========================
-# DISPARO DO PACOTE COMPLETO
-# =========================
-def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
-
-    try:
-
-        eid = int(encontro_id)
-
-        if not _wa_is_configured():
-
-            erro = {
-                "ok": False,
-                "erro": "whatsapp_not_configured"
-            }
-
-            _set_whatsapp_error(cur, eid, erro)
-
-            return erro
+        # pequena espera para não competir com o primeiro disparo
+        time.sleep(4)
 
         cur.execute("""
             SELECT
                 e.id,
                 e.tipo_vulneravel,
                 e.foto_arquivo,
-                e.onboarding_whatsapp_enviado,
+                e.whatsapp_ultimo_erro,
                 r.nome,
                 COALESCE(r.whatsapp, r.telefone) AS responsavel_whatsapp,
                 v.nome,
@@ -1632,14 +1437,252 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         row = cur.fetchone()
 
         if not row:
+            return
 
-            erro = {
-                "ok": False,
-                "erro": "encontro_not_found"
-            }
+        (
+            _id,
+            tipo_vulneravel,
+            foto_arquivo,
+            whatsapp_ultimo_erro,
+            nome_responsavel,
+            responsavel_whatsapp,
+            nome_voluntario,
+            nome_vulneravel,
+        ) = row
 
+        if not whatsapp_ultimo_erro:
+            return
+
+        try:
+            erro_obj = json.loads(whatsapp_ultimo_erro)
+        except Exception:
+            return
+
+        retry_template = bool(erro_obj.get("retry_template"))
+        retry_location = bool(erro_obj.get("retry_location"))
+        retry_image = bool(erro_obj.get("retry_image"))
+
+        if not retry_template and not retry_location and not retry_image:
+            return
+
+        cur.execute("""
+            SELECT latitude, longitude, voluntario_nome
+            FROM localizacoes
+            WHERE encontro_id=%s
+              AND latitude IS NOT NULL
+              AND longitude IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 1
+        """, (eid,))
+
+        loc = cur.fetchone()
+
+        lat = None
+        lng = None
+        voluntario_nome_loc = None
+
+        if loc:
+            lat, lng, voluntario_nome_loc = loc
+
+        nome_voluntario_final = (
+            (nome_voluntario or "").strip()
+            or (voluntario_nome_loc or "").strip()
+            or "Voluntário"
+        )
+
+        nome_vulneravel_final = (
+            (nome_vulneravel or "").strip()
+            or (nome_responsavel or "").strip()
+            or "Pessoa"
+        )
+
+        foto_url = f"{PUBLIC_BASE_URL}/media/fotos/{foto_arquivo}" if foto_arquivo else None
+        legenda = f"Tipo: {tipo_vulneravel} | Voluntário: {nome_voluntario_final}"
+
+        resultados_retry = {}
+
+        # =========================
+        # RETRY TEMPLATE
+        # =========================
+        template_ok = not retry_template
+
+        if retry_template:
+            try:
+                resultados_retry["template_retry"] = _wa_send_template(
+                    to_number=responsavel_whatsapp,
+                    nome=nome_vulneravel_final,
+                    tipo=tipo_vulneravel,
+                    voluntario=nome_voluntario_final,
+                )
+
+                template_ok = _meta_response_ok(
+                    resultados_retry.get("template_retry")
+                )
+
+            except Exception as e:
+                resultados_retry["template_retry"] = {
+                    "ok": False,
+                    "erro": "template_retry_exception",
+                    "detail": repr(e),
+                }
+
+        time.sleep(2)
+
+        # =========================
+        # RETRY LOCALIZAÇÃO
+        # =========================
+        location_ok = not retry_location
+
+        if retry_location and lat is not None and lng is not None:
+            try:
+                resultados_retry["location_retry"] = _wa_send_location(
+                    to_number=responsavel_whatsapp,
+                    latitude=float(lat),
+                    longitude=float(lng),
+                    nome="Localização enviada pelo voluntário",
+                )
+
+                location_ok = _meta_response_ok(
+                    resultados_retry.get("location_retry")
+                )
+
+            except Exception as e:
+                resultados_retry["location_retry"] = {
+                    "ok": False,
+                    "erro": "location_retry_exception",
+                    "detail": repr(e),
+                }
+
+        time.sleep(2)
+
+        # =========================
+        # RETRY FOTO
+        # =========================
+        image_ok = not retry_image
+
+        if retry_image and foto_url:
+            try:
+                resultados_retry["image_retry"] = _wa_send_image_by_link(
+                    to_number=responsavel_whatsapp,
+                    image_url=foto_url,
+                    caption=legenda,
+                )
+
+                image_ok = _meta_response_ok(
+                    resultados_retry.get("image_retry")
+                )
+
+            except Exception as e:
+                resultados_retry["image_retry"] = {
+                    "ok": False,
+                    "erro": "image_retry_exception",
+                    "detail": repr(e),
+                    "foto_url": foto_url,
+                }
+
+        pacote_ok = bool(template_ok and location_ok and image_ok)
+
+        if pacote_ok:
+            cur.execute("""
+                UPDATE encontros
+                SET onboarding_whatsapp_enviado=1,
+                    onboarding_whatsapp_enviado_em=NOW(),
+                    whatsapp_ultimo_erro=NULL
+                WHERE id=%s
+            """, (eid,))
+        else:
+            novo_erro = json.dumps({
+                "erro": "retry_pacote_parcial",
+                "template_ok": template_ok,
+                "location_ok": location_ok,
+                "image_ok": image_ok,
+                "retry_template": not template_ok,
+                "retry_location": not location_ok,
+                "retry_image": not image_ok,
+                "resultados_retry": resultados_retry,
+                "foto_url": foto_url,
+                "latitude": float(lat) if lat is not None else None,
+                "longitude": float(lng) if lng is not None else None,
+            }, ensure_ascii=False)[:5000]
+
+            cur.execute("""
+                UPDATE encontros
+                SET onboarding_whatsapp_enviado=0,
+                    whatsapp_ultimo_erro=%s
+                WHERE id=%s
+            """, (novo_erro, eid))
+
+        cnx.commit()
+
+        _dbg("WHATSAPP_RETRY_MIDIAS_RESULTADO", {
+            "encontro_id": eid,
+            "template_ok": template_ok,
+            "location_ok": location_ok,
+            "image_ok": image_ok,
+            "pacote_ok": pacote_ok,
+            "resultados_retry": resultados_retry,
+        })
+
+    except Exception as e:
+        cnx.rollback()
+        _log_exc("Erro no retry de mídias pendentes WhatsApp", e)
+
+    finally:
+        try:
+            cur.close()
+            cnx.close()
+        except Exception:
+            pass
+# =========================
+# DISPARO DO PACOTE COMPLETO
+# =========================
+def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
+    """
+    Envia pacote completo ao responsável:
+    1) template aprovado
+    2) localização
+    3) foto
+
+    Regra:
+    - Mantém estrutura original.
+    - Não usa retry pesado aqui.
+    - Não trava o front.
+    - Se algum item falhar, salva erro.
+    - Só pula envio se já foi enviado sem erro.
+    """
+
+    try:
+        eid = int(encontro_id)
+
+        if not _wa_is_configured():
+            erro = {"ok": False, "erro": "whatsapp_not_configured"}
             _set_whatsapp_error(cur, eid, erro)
+            return erro
 
+        cur.execute("""
+            SELECT
+                e.id,
+                e.tipo_vulneravel,
+                e.foto_arquivo,
+                e.onboarding_whatsapp_enviado,
+                e.whatsapp_ultimo_erro,
+                r.nome,
+                COALESCE(r.whatsapp, r.telefone) AS responsavel_whatsapp,
+                v.nome,
+                p.nome_dependente
+            FROM encontros e
+            LEFT JOIN responsaveis r ON r.id = e.responsavel_id
+            LEFT JOIN voluntarios v ON v.id = e.voluntario_id
+            LEFT JOIN pulseiras_qr p ON p.id = e.pulseira_id
+            WHERE e.id=%s
+            LIMIT 1
+        """, (eid,))
+
+        row = cur.fetchone()
+
+        if not row:
+            erro = {"ok": False, "erro": "encontro_not_found"}
+            _set_whatsapp_error(cur, eid, erro)
             return erro
 
         (
@@ -1647,46 +1690,27 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             tipo_vulneravel,
             foto_arquivo,
             onboarding_enviado,
+            whatsapp_ultimo_erro,
             nome_responsavel,
             responsavel_whatsapp,
             nome_voluntario,
             nome_vulneravel,
         ) = row
 
-        # =========================
-        # JÁ COMPLETO
-        # =========================
-        if int(onboarding_enviado or 0) == 1:
-
-            return {
-                "ok": True,
-                "skipped": "already_sent"
-            }
+        # Só pula se já foi enviado COMPLETO e sem erro pendente
+        if int(onboarding_enviado or 0) == 1 and not whatsapp_ultimo_erro:
+            return {"ok": True, "skipped": "already_sent"}
 
         if not responsavel_whatsapp:
-
-            erro = {
-                "ok": False,
-                "erro": "responsavel_whatsapp_ausente"
-            }
-
+            erro = {"ok": False, "erro": "responsavel_whatsapp_ausente"}
             _set_whatsapp_error(cur, eid, erro)
-
             return erro
 
         if not tipo_vulneravel:
-
-            return {
-                "ok": False,
-                "skipped": "tipo_vulneravel_ausente"
-            }
+            return {"ok": False, "skipped": "tipo_vulneravel_ausente"}
 
         if not foto_arquivo:
-
-            return {
-                "ok": False,
-                "skipped": "foto_arquivo_ausente"
-            }
+            return {"ok": False, "skipped": "foto_arquivo_ausente"}
 
         cur.execute("""
             SELECT latitude, longitude, voluntario_nome
@@ -1701,96 +1725,79 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         loc = cur.fetchone()
 
         if not loc:
-
-            return {
-                "ok": False,
-                "skipped": "localizacao_ausente"
-            }
+            return {"ok": False, "skipped": "localizacao_ausente"}
 
         lat, lng, voluntario_nome_loc = loc
 
+        if lat is None or lng is None:
+            return {"ok": False, "skipped": "latitude_longitude_ausente"}
+
         nome_voluntario_final = (
             (nome_voluntario or "").strip()
-            or
-            (voluntario_nome_loc or "").strip()
-            or
-            "Voluntário"
+            or (voluntario_nome_loc or "").strip()
+            or "Voluntário"
         )
 
         nome_vulneravel_final = (
             (nome_vulneravel or "").strip()
-            or
-            (nome_responsavel or "").strip()
-            or
-            "Pessoa"
+            or (nome_responsavel or "").strip()
+            or "Pessoa"
         )
 
-        foto_url = (
-            f"{PUBLIC_BASE_URL}/media/fotos/{foto_arquivo}"
-        )
+        foto_url = f"{PUBLIC_BASE_URL}/media/fotos/{foto_arquivo}"
+        legenda = f"Tipo: {tipo_vulneravel} | Voluntário: {nome_voluntario_final}"
+
+        _dbg("WHATSAPP_ONBOARDING_PRONTO", {
+            "encontro_id": eid,
+            "responsavel_whatsapp": responsavel_whatsapp,
+            "tipo_vulneravel": tipo_vulneravel,
+            "nome_voluntario": nome_voluntario_final,
+            "latitude": float(lat),
+            "longitude": float(lng),
+            "foto_url": foto_url,
+            "retry_por_erro_anterior": bool(whatsapp_ultimo_erro),
+        })
 
         resultados = {}
 
-        # =========================
-        # TEMPLATE
-        # =========================
+        # 1) TEMPLATE
         try:
-
             resultados["template"] = _wa_send_template(
                 to_number=responsavel_whatsapp,
                 nome=nome_vulneravel_final,
                 tipo=tipo_vulneravel,
                 voluntario=nome_voluntario_final,
             )
-
         except Exception as e:
-
             resultados["template"] = {
                 "ok": False,
                 "erro": "template_exception",
                 "detail": repr(e),
             }
 
-        # =========================
-        # LOCALIZAÇÃO
-        # =========================
+        # 2) LOCALIZAÇÃO NATIVA
         try:
-
-            resultados["location"] = _wa_send_text(
+            resultados["location"] = _wa_send_location(
                 to_number=responsavel_whatsapp,
-                text=(
-                    "📍 Localização enviada pelo voluntário:\n\n"
-                    f"https://maps.google.com/?q={lat},{lng}"
-                )
+                latitude=float(lat),
+                longitude=float(lng),
+                nome="Localização do encontro",
             )
-
         except Exception as e:
-
             resultados["location"] = {
                 "ok": False,
                 "erro": "location_exception",
                 "detail": repr(e),
             }
 
-        # =========================
-        # FOTO
-        # =========================
+        # 3) FOTO NATIVA
         try:
-
-            legenda = (
-                "📸 Foto enviada pelo voluntário\n\n"
-                f"Tipo: {tipo_vulneravel}\n"
-                f"Voluntário: {nome_voluntario_final}"
-            )
-
             resultados["image"] = _wa_send_image_by_link(
                 to_number=responsavel_whatsapp,
                 image_url=foto_url,
                 caption=legenda,
             )
-
         except Exception as e:
-
             resultados["image"] = {
                 "ok": False,
                 "erro": "image_exception",
@@ -1798,100 +1805,69 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "foto_url": foto_url,
             }
 
-        template_ok = _meta_response_ok(
-            resultados.get("template")
-        )
+        template_ok = _meta_response_ok(resultados.get("template"))
+        location_ok = _meta_response_ok(resultados.get("location"))
+        image_ok = _meta_response_ok(resultados.get("image"))
 
-        location_ok = _meta_response_ok(
-            resultados.get("location")
-        )
-
-        image_ok = _meta_response_ok(
-            resultados.get("image")
-        )
-
-        pacote_ok = bool(
-            template_ok
-            and
-            location_ok
-            and
-            image_ok
-        )
+        pacote_ok = bool(template_ok and location_ok and image_ok)
 
         erro_txt = None
 
         if not pacote_ok:
-
             erro_txt = json.dumps({
-
+                "erro": "pacote_parcial",
                 "template_ok": template_ok,
                 "location_ok": location_ok,
                 "image_ok": image_ok,
-
+                "retry_template": not template_ok,
+                "retry_location": not location_ok,
+                "retry_image": not image_ok,
+                "resultados": resultados,
+                "foto_url": foto_url,
+                "latitude": float(lat),
+                "longitude": float(lng),
             }, ensure_ascii=False)[:5000]
 
-        # =========================
-        # UPDATE
-        # =========================
         cur.execute("""
             UPDATE encontros
-            SET onboarding_whatsapp_enviado=%s,
-                onboarding_whatsapp_enviado_em=CASE
-                    WHEN %s = 1 THEN NOW()
-                    ELSE onboarding_whatsapp_enviado_em
-                END,
+            SET onboarding_whatsapp_enviado=1,
+                onboarding_whatsapp_enviado_em=NOW(),
                 whatsapp_ultimo_erro=%s
             WHERE id=%s
         """, (
-
-            1 if pacote_ok else 0,
-            1 if pacote_ok else 0,
-
-            erro_txt,
-
+            None if pacote_ok else erro_txt,
             eid
         ))
 
-        # =========================
-        # RETRY EM BACKGROUND
-        # =========================
-        if not pacote_ok:
+        if pacote_ok:
+            _clear_whatsapp_error(cur, eid)
 
-            try:
-
-                threading.Thread(
-                    target=_retry_whatsapp_midias_pendentes,
-                    args=(cur, eid),
-                    daemon=True
-                ).start()
-
-            except Exception as e:
-
-                _log_exc(
-                    "Erro ao iniciar retry em background",
-                    e
-                )
-
-        return {
-
-            "ok": pacote_ok,
-
-            "chat_liberado": True,
-
+        _dbg("WHATSAPP_ONBOARDING_RESULTADO", {
+            "encontro_id": eid,
             "template_ok": template_ok,
             "location_ok": location_ok,
             "image_ok": image_ok,
-
+            "pacote_ok": pacote_ok,
+            "chat_liberado": True,
             "resultados": resultados,
+        })
 
+        return {
+            "ok": pacote_ok,
+            "chat_liberado": True,
+            "template_ok": template_ok,
+            "location_ok": location_ok,
+            "image_ok": image_ok,
+            "retry_template": not template_ok,
+            "retry_location": not location_ok,
+            "retry_image": not image_ok,
+            "resultados": resultados,
             "foto_url": foto_url,
-
             "latitude": float(lat),
             "longitude": float(lng),
         }
 
     except HTTPException as e:
-
         erro = {
             "ok": False,
             "erro": "http_exception",
@@ -1899,22 +1875,14 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         }
 
         try:
-            _set_whatsapp_error(
-                cur,
-                int(encontro_id),
-                erro
-            )
+            _set_whatsapp_error(cur, int(encontro_id), erro)
         except Exception:
             pass
 
         return erro
 
     except Exception as e:
-
-        _log_exc(
-            "Falha ao enviar onboarding para WhatsApp",
-            e
-        )
+        _log_exc("Falha ao enviar onboarding para WhatsApp", e)
 
         erro = {
             "ok": False,
@@ -1923,11 +1891,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         }
 
         try:
-            _set_whatsapp_error(
-                cur,
-                int(encontro_id),
-                erro
-            )
+            _set_whatsapp_error(cur, int(encontro_id), erro)
         except Exception:
             pass
 
