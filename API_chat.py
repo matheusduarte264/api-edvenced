@@ -1751,17 +1751,30 @@ def _retry_whatsapp_midias_pendentes(encontro_id: int):
 # =========================
 # DISPARO WHATSAPP POR EVENTO
 # =========================
+
+def _wa_send_text(to_number: str, text: str):
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": str(to_number),
+        "type": "text",
+        "text": {
+            "preview_url": True,
+            "body": text
+        }
+    }
+    return _wa_post(payload)
+
+
 def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     """
     Envia WhatsApp por evento, sem depender da ordem perfeita.
 
     Regra:
-    - Se tipo chegou: envia template.
-    - Se localização chegou: envia localização.
-    - Se foto chegou: envia foto.
+    - Se tipo chegou: envia template como já estava.
+    - Se localização chegou: envia localização nativa + backup por link.
+    - Se foto chegou: envia foto nativa + backup por link.
     - Não trava esperando tudo.
-    - Só marca onboarding_whatsapp_enviado=1 quando template + localização + foto forem enviados.
-    - Se algo faltar ou falhar, salva em whatsapp_ultimo_erro e retry tenta depois.
+    - Padroniza entrega para Android e iPhone.
     """
 
     try:
@@ -1829,6 +1842,9 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         template_ok = bool(estado_anterior.get("template_ok"))
         location_ok = bool(estado_anterior.get("location_ok"))
         image_ok = bool(estado_anterior.get("image_ok"))
+
+        location_backup_ok = bool(estado_anterior.get("location_backup_ok"))
+        image_backup_ok = bool(estado_anterior.get("image_backup_ok"))
 
         resultados = {}
 
@@ -1909,6 +1925,31 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 }
 
         # =========================
+        # 2.1) BACKUP LOCALIZAÇÃO - PADRÃO ANDROID/IPHONE
+        # =========================
+        if lat is not None and lng is not None and not location_backup_ok:
+            try:
+                maps_url = f"https://maps.google.com/?q={float(lat)},{float(lng)}"
+
+                resultados["location_backup"] = _wa_send_text(
+                    to_number=responsavel_whatsapp,
+                    text=(
+                        "📍 Localização do encontro:\n"
+                        f"{maps_url}\n\n"
+                        "Caso o mapa não abra automaticamente, toque no link acima."
+                    )
+                )
+
+                location_backup_ok = _meta_response_ok(resultados.get("location_backup"))
+
+            except Exception as e:
+                resultados["location_backup"] = {
+                    "ok": False,
+                    "erro": "location_backup_exception",
+                    "detail": repr(e),
+                }
+
+        # =========================
         # 3) FOTO CHEGOU -> ENVIA FOTO
         # =========================
         if foto_url and not image_ok:
@@ -1929,20 +1970,54 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                     "foto_url": foto_url,
                 }
 
-        pacote_ok = bool(template_ok and location_ok and image_ok)
+        # =========================
+        # 3.1) BACKUP FOTO - PADRÃO ANDROID/IPHONE
+        # =========================
+        if foto_url and not image_backup_ok:
+            try:
+                resultados["image_backup"] = _wa_send_text(
+                    to_number=responsavel_whatsapp,
+                    text=(
+                        "📸 Foto do encontro:\n"
+                        f"{foto_url}\n\n"
+                        "Caso a foto não apareça automaticamente, toque no link acima."
+                    )
+                )
+
+                image_backup_ok = _meta_response_ok(resultados.get("image_backup"))
+
+            except Exception as e:
+                resultados["image_backup"] = {
+                    "ok": False,
+                    "erro": "image_backup_exception",
+                    "detail": repr(e),
+                    "foto_url": foto_url,
+                }
+
+        location_entregue_ok = bool(location_ok or location_backup_ok)
+        image_entregue_ok = bool(image_ok or image_backup_ok)
+
+        pacote_ok = bool(template_ok and location_entregue_ok and image_entregue_ok)
 
         erro_txt = None
 
         if not pacote_ok:
             erro_txt = json.dumps({
                 "erro": "pacote_parcial_eventos",
+
                 "template_ok": template_ok,
                 "location_ok": location_ok,
                 "image_ok": image_ok,
 
+                "location_backup_ok": location_backup_ok,
+                "image_backup_ok": image_backup_ok,
+
+                "location_entregue_ok": location_entregue_ok,
+                "image_entregue_ok": image_entregue_ok,
+
                 "retry_template": not template_ok,
-                "retry_location": not location_ok,
-                "retry_image": not image_ok,
+                "retry_location": not location_entregue_ok,
+                "retry_image": not image_entregue_ok,
 
                 "tipo_disponivel": bool(tipo_vulneravel),
                 "localizacao_disponivel": bool(lat is not None and lng is not None),
@@ -1988,6 +2063,10 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "template_ok": template_ok,
             "location_ok": location_ok,
             "image_ok": image_ok,
+            "location_backup_ok": location_backup_ok,
+            "image_backup_ok": image_backup_ok,
+            "location_entregue_ok": location_entregue_ok,
+            "image_entregue_ok": image_entregue_ok,
             "pacote_ok": pacote_ok,
             "resultados": resultados,
         })
@@ -1995,12 +2074,21 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
         return {
             "ok": pacote_ok,
             "chat_liberado": bool(template_ok),
+
             "template_ok": template_ok,
             "location_ok": location_ok,
             "image_ok": image_ok,
+
+            "location_backup_ok": location_backup_ok,
+            "image_backup_ok": image_backup_ok,
+
+            "location_entregue_ok": location_entregue_ok,
+            "image_entregue_ok": image_entregue_ok,
+
             "retry_template": not template_ok,
-            "retry_location": not location_ok,
-            "retry_image": not image_ok,
+            "retry_location": not location_entregue_ok,
+            "retry_image": not image_entregue_ok,
+
             "resultados": resultados,
             "foto_url": foto_url,
             "latitude": float(lat) if lat is not None else None,
