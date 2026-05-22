@@ -1751,29 +1751,22 @@ def _retry_whatsapp_midias_pendentes(encontro_id: int):
 # =========================
 # DISPARO WHATSAPP POR EVENTO
 # =========================
-
-def _wa_send_text(to_number: str, text: str):
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": str(to_number),
-        "type": "text",
-        "text": {
-            "preview_url": True,
-            "body": text
-        }
-    }
-    return _wa_post(payload)
-
-
 def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
     """
     Envia WhatsApp por evento, sem depender da ordem perfeita.
 
     Regra:
-    - Se tipo chegou: envia template como já estava.
-    - Se localização chegou: envia localização nativa + backup por link.
-    - Se foto chegou: envia foto nativa + backup por link.
+    - Se tipo chegou: envia template.
+    - Se localização chegou: envia localização.
+    - Se foto chegou: envia foto.
     - Não trava esperando tudo.
+    - Só marca onboarding_whatsapp_enviado=1 quando template + localização + foto forem enviados.
+    - Se algo faltar ou falhar, salva em whatsapp_ultimo_erro e retry tenta depois.
+
+    Tratamento:
+    - Mantém envio nativo de localização e foto.
+    - Se localização nativa falhar, envia backup com link Google Maps.
+    - Se foto nativa falhar, envia backup com link da foto.
     - Padroniza entrega para Android e iPhone.
     """
 
@@ -1879,7 +1872,21 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             or "Pessoa"
         )
 
-        foto_url = f"{PUBLIC_BASE_URL}/media/fotos/{foto_arquivo}" if foto_arquivo else None
+        # =========================
+        # TRATAMENTO PADRÃO DA URL DA FOTO
+        # =========================
+        foto_url = None
+
+        if foto_arquivo:
+            foto_arquivo_limpo = str(foto_arquivo).strip().lstrip("/")
+
+            if foto_arquivo_limpo.startswith("http://") or foto_arquivo_limpo.startswith("https://"):
+                foto_url = foto_arquivo_limpo
+            elif foto_arquivo_limpo.startswith("media/fotos/"):
+                foto_url = f"{PUBLIC_BASE_URL}/{foto_arquivo_limpo}"
+            else:
+                foto_url = f"{PUBLIC_BASE_URL}/media/fotos/{foto_arquivo_limpo}"
+
         legenda = f"Tipo: {tipo_vulneravel or 'não informado'} | Voluntário: {nome_voluntario_final}"
 
         # =========================
@@ -1904,7 +1911,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 }
 
         # =========================
-        # 2) LOCALIZAÇÃO CHEGOU -> ENVIA LOCALIZAÇÃO
+        # 2) LOCALIZAÇÃO CHEGOU -> ENVIA LOCALIZAÇÃO NATIVA
         # =========================
         if lat is not None and lng is not None and not location_ok:
             try:
@@ -1925,7 +1932,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 }
 
         # =========================
-        # 2.1) BACKUP LOCALIZAÇÃO - PADRÃO ANDROID/IPHONE
+        # 2.1) BACKUP DA LOCALIZAÇÃO - ANDROID/IPHONE
         # =========================
         if lat is not None and lng is not None and not location_backup_ok:
             try:
@@ -1950,7 +1957,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 }
 
         # =========================
-        # 3) FOTO CHEGOU -> ENVIA FOTO
+        # 3) FOTO CHEGOU -> ENVIA FOTO NATIVA
         # =========================
         if foto_url and not image_ok:
             try:
@@ -1971,7 +1978,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 }
 
         # =========================
-        # 3.1) BACKUP FOTO - PADRÃO ANDROID/IPHONE
+        # 3.1) BACKUP DA FOTO - ANDROID/IPHONE
         # =========================
         if foto_url and not image_backup_ok:
             try:
@@ -2024,6 +2031,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
                 "foto_disponivel": bool(foto_url),
 
                 "resultados": resultados,
+                "foto_arquivo": foto_arquivo,
                 "foto_url": foto_url,
                 "latitude": float(lat) if lat is not None else None,
                 "longitude": float(lng) if lng is not None else None,
@@ -2069,6 +2077,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "image_entregue_ok": image_entregue_ok,
             "pacote_ok": pacote_ok,
             "resultados": resultados,
+            "foto_url": foto_url,
         })
 
         return {
@@ -2090,6 +2099,7 @@ def _maybe_send_onboarding_to_whatsapp(cur, encontro_id: int):
             "retry_image": not image_entregue_ok,
 
             "resultados": resultados,
+            "foto_arquivo": foto_arquivo,
             "foto_url": foto_url,
             "latitude": float(lat) if lat is not None else None,
             "longitude": float(lng) if lng is not None else None,
