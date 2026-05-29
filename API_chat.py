@@ -3850,6 +3850,76 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
 
 
 # =========================
+# GATILHO DE MÍDIAS APÓS RESPOSTA DO RESPONSÁVEL
+# =========================
+def _disparar_midias_apos_resposta_responsavel(
+    resolvido,
+    from_number=None,
+    texto_recebido=None,
+    msg_type=None,
+):
+    """
+    Dispara foto e localização depois que o responsável interage no WhatsApp.
+
+    Aceita:
+    - text: quando o responsável digita uma mensagem.
+    - button: quando o responsável clica no botão "Responder".
+
+    Não altera a estrutura do webhook.
+    Só recebe o payload retornado por _resolve_encontro_ativo_do_responsavel().
+    """
+
+    try:
+        msg_type_normalizado = str(msg_type or "").strip().lower()
+
+        if msg_type_normalizado and msg_type_normalizado not in ("text", "button"):
+            _dbg("WHATSAPP/MIDIAS/GATILHO_TIPO_IGNORADO", {
+                "msg_type": msg_type,
+                "from_number": from_number,
+                "texto_recebido": texto_recebido,
+            })
+            return False
+
+        if not resolvido:
+            _dbg("WHATSAPP/MIDIAS/GATILHO_SEM_RESOLVIDO", {
+                "msg_type": msg_type,
+                "from_number": from_number,
+                "texto_recebido": texto_recebido,
+            })
+            return False
+
+        encontro_id = resolvido.get("encontro_id")
+
+        if not encontro_id:
+            _dbg("WHATSAPP/MIDIAS/GATILHO_SEM_ENCONTRO_ID", {
+                "resolvido": resolvido,
+                "msg_type": msg_type,
+                "from_number": from_number,
+                "texto_recebido": texto_recebido,
+            })
+            return False
+
+        _dbg("WHATSAPP/MIDIAS/GATILHO_DISPARADO", {
+            "encontro_id": encontro_id,
+            "msg_type": msg_type,
+            "from_number": from_number,
+            "texto_recebido": texto_recebido,
+        })
+
+        threading.Thread(
+            target=_send_midias_apos_resposta_responsavel,
+            args=(int(encontro_id),),
+            daemon=True
+        ).start()
+
+        return True
+
+    except Exception as e:
+        _log_exc("Erro ao disparar mídias após resposta do responsável", e)
+        return False
+
+
+# =========================
 # HELPERS DE MÍDIA VINDOS DA META
 # =========================
 
