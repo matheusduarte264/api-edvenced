@@ -3918,7 +3918,6 @@ def _disparar_midias_apos_resposta_responsavel(
         _log_exc("Erro ao disparar mídias após resposta do responsável", e)
         return False
 
-
 # =========================
 # HELPERS DE MÍDIA VINDOS DA META
 # =========================
