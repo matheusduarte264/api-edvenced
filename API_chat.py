@@ -4091,6 +4091,44 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             "texto": texto,
                         })
 
+                    elif msg_type == "button":
+                        button_obj = msg.get("button") or {}
+
+                        texto = (
+                            button_obj.get("text")
+                            or button_obj.get("payload")
+                            or "Ver localização e foto"
+                        ).strip()
+
+                        _dbg("WHATSAPP/WEBHOOK_BUTTON_RECEBIDO", {
+                            "wa_from": wa_from,
+                            "wa_from_name": wa_from_name,
+                            "msg_id": msg_id,
+                            "texto": texto,
+                            "button": button_obj,
+                        })
+
+                    elif msg_type == "interactive":
+                        interactive_obj = msg.get("interactive") or {}
+                        button_reply = interactive_obj.get("button_reply") or {}
+                        list_reply = interactive_obj.get("list_reply") or {}
+
+                        texto = (
+                            button_reply.get("title")
+                            or button_reply.get("id")
+                            or list_reply.get("title")
+                            or list_reply.get("id")
+                            or "Ver localização e foto"
+                        ).strip()
+
+                        _dbg("WHATSAPP/WEBHOOK_INTERACTIVE_RECEBIDO", {
+                            "wa_from": wa_from,
+                            "wa_from_name": wa_from_name,
+                            "msg_id": msg_id,
+                            "texto": texto,
+                            "interactive": interactive_obj,
+                        })
+
                     elif msg_type == "audio":
                         audio_obj = msg.get("audio") or {}
                         audio_id = (audio_obj.get("id") or "").strip()
@@ -4145,11 +4183,12 @@ async def receber_webhook_meta_whatsapp(request: Request):
                         })
                         continue
 
-                    if msg_type == "text" and not texto:
+                    if msg_type in ("text", "button", "interactive") and not texto:
                         _dbg("WHATSAPP/WEBHOOK_TEXTO_VAZIO", {
                             "wa_from": wa_from,
                             "wa_from_name": wa_from_name,
                             "msg_id": msg_id,
+                            "msg_type": msg_type,
                         })
                         continue
 
@@ -4217,7 +4256,7 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             "telefone_legacy": telefone_legacy,
                         })
 
-                        if msg_type == "text":
+                        if msg_type in ("text", "button", "interactive"):
                             cur.execute("""
                                 INSERT INTO mensagens
                                   (encontro_id, tipo, conteudo_texto, telefone_origem, nome_origem,
@@ -4241,6 +4280,7 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 "login_vinculo": login_vinculo,
                                 "codigo_qr": codigo_qr,
                                 "texto": texto,
+                                "msg_type": msg_type,
                             })
 
                             _notify_poll("voluntario", encontro_id, login_vinculo)
@@ -4249,9 +4289,17 @@ async def receber_webhook_meta_whatsapp(request: Request):
                                 "destino": "voluntario",
                                 "encontro_id": encontro_id,
                                 "login_vinculo": login_vinculo,
-                                "msg_type": "text",
+                                "msg_type": msg_type,
                                 "msg_id": msg_id,
                             })
+
+                            _disparar_midias_apos_resposta_responsavel(
+                                resolvido=encontro_info,
+                                from_number=wa_from,
+                                texto_recebido=texto,
+                                msg_type=msg_type,
+                            )
+
                             continue
 
                         if msg_type == "audio":
@@ -4306,33 +4354,13 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             })
 
                             _notify_poll("voluntario", encontro_id, login_vinculo)
-
-                            _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
-                                "destino": "voluntario",
-                                "encontro_id": encontro_id,
-                                "login_vinculo": login_vinculo,
-                                "msg_type": "audio",
-                                "msg_id": msg_id,
-                            })
                             continue
 
                         if msg_type == "image":
-                            _dbg("WHATSAPP/WEBHOOK_IMAGE_BAIXANDO_META", {
-                                "image_id": image_id,
-                                "image_mime_type": image_mime_type,
-                                "encontro_id": encontro_id,
-                            })
-
                             filename = _wa_save_incoming_image_from_meta(
                                 media_id=image_id,
                                 original_mime_type=image_mime_type
                             )
-
-                            _dbg("WHATSAPP/WEBHOOK_IMAGE_BAIXADA_META", {
-                                "arquivo_foto": filename,
-                                "image_id": image_id,
-                                "encontro_id": encontro_id,
-                            })
 
                             cur.execute("""
                                 INSERT INTO mensagens
@@ -4352,24 +4380,7 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             nova_msg_id = cur.lastrowid
                             cnx.commit()
 
-                            _dbg("WHATSAPP/WEBHOOK_IMAGE_SALVA", {
-                                "mensagem_id": nova_msg_id,
-                                "encontro_id": encontro_id,
-                                "login_vinculo": login_vinculo,
-                                "codigo_qr": codigo_qr,
-                                "arquivo_foto": filename,
-                                "image_caption": image_caption,
-                            })
-
                             _notify_poll("voluntario", encontro_id, login_vinculo)
-
-                            _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
-                                "destino": "voluntario",
-                                "encontro_id": encontro_id,
-                                "login_vinculo": login_vinculo,
-                                "msg_type": "image",
-                                "msg_id": msg_id,
-                            })
                             continue
 
                         if msg_type == "location":
@@ -4415,27 +4426,7 @@ async def receber_webhook_meta_whatsapp(request: Request):
                             nova_msg_id = cur.lastrowid
                             cnx.commit()
 
-                            _dbg("WHATSAPP/WEBHOOK_LOCATION_SALVA", {
-                                "mensagem_id": nova_msg_id,
-                                "encontro_id": encontro_id,
-                                "login_vinculo": login_vinculo,
-                                "codigo_qr": codigo_qr,
-                                "latitude": lat,
-                                "longitude": lng,
-                                "maps_link": maps_link,
-                                "name": loc_name,
-                                "address": loc_address,
-                            })
-
                             _notify_poll("voluntario", encontro_id, login_vinculo)
-
-                            _dbg("WHATSAPP/WEBHOOK_NOTIFY_POLL_OK", {
-                                "destino": "voluntario",
-                                "encontro_id": encontro_id,
-                                "login_vinculo": login_vinculo,
-                                "msg_type": "location",
-                                "msg_id": msg_id,
-                            })
                             continue
 
                     except Exception as e:
