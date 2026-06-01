@@ -3850,7 +3850,7 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
 
 
 # =========================
-# GATILHO DE MÍDIAS APÓS RESPOSTA DO RESPONSÁVEL
+# GATILHO DE MÍDIAS APÓS CLIQUE DO RESPONSÁVEL
 # =========================
 def _disparar_midias_apos_resposta_responsavel(
     resolvido,
@@ -3859,22 +3859,25 @@ def _disparar_midias_apos_resposta_responsavel(
     msg_type=None,
 ):
     """
-    Dispara foto e localização depois que o responsável interage no WhatsApp.
+    Dispara foto e localização somente quando o responsável clica no botão do WhatsApp.
 
-    Aceita:
-    - text: quando o responsável digita uma mensagem.
-    - button: quando o responsável clica no botão "Responder".
+    Regra:
+    - button: dispara localização e foto.
+    - text: NÃO dispara localização e foto.
+    - audio/image/location: NÃO dispara localização e foto.
 
-    Não altera a estrutura do webhook.
-    Só recebe o payload retornado por _resolve_encontro_ativo_do_responsavel().
+    Assim, mensagens normais do responsável continuam indo para o chat,
+    mas não reenviam foto e localização repetidamente.
     """
 
     try:
         msg_type_normalizado = str(msg_type or "").strip().lower()
 
-        if msg_type_normalizado and msg_type_normalizado not in ("text", "button"):
+        if msg_type_normalizado != "button":
             _dbg("WHATSAPP/MIDIAS/GATILHO_TIPO_IGNORADO", {
+                "motivo": "somente_button_dispara_midias",
                 "msg_type": msg_type,
+                "msg_type_normalizado": msg_type_normalizado,
                 "from_number": from_number,
                 "texto_recebido": texto_recebido,
             })
@@ -3915,9 +3918,8 @@ def _disparar_midias_apos_resposta_responsavel(
         return True
 
     except Exception as e:
-        _log_exc("Erro ao disparar mídias após resposta do responsável", e)
+        _log_exc("Erro ao disparar mídias após clique do responsável", e)
         return False
-
 # =========================
 # HELPERS DE MÍDIA VINDOS DA META
 # =========================
