@@ -960,6 +960,19 @@ def _resolve_voluntario_por_telefone(cur, tel: Optional[str]) -> Optional[Dict[s
 
 
 def _ensure_encontro(cur, pulseira_id: int, responsavel_id: Optional[int] = None, voluntario_id: Optional[int] = None) -> int:
+    if responsavel_id is None:
+        cur.execute("""
+            SELECT responsavel_id
+            FROM pulseiras_qr
+            WHERE id=%s
+            LIMIT 1
+        """, (int(pulseira_id),))
+
+        row_resp = cur.fetchone()
+
+        if row_resp and row_resp[0] is not None:
+            responsavel_id = int(row_resp[0])
+
     cur.execute("""
         SELECT id, voluntario_id, onboarding_whatsapp_enviado
         FROM encontros
@@ -976,12 +989,17 @@ def _ensure_encontro(cur, pulseira_id: int, responsavel_id: Optional[int] = None
         template_enviado = int(row[2] or 0)
 
         if voluntario_id and voluntario_atual == int(voluntario_id):
+            cur.execute("""
+                UPDATE encontros
+                SET responsavel_id = COALESCE(responsavel_id, %s)
+                WHERE id=%s
+            """, (responsavel_id, encontro_id_atual))
             return encontro_id_atual
 
         if voluntario_id and voluntario_atual is None:
             cur.execute("""
                 UPDATE encontros
-                SET responsavel_id = COALESCE(%s, responsavel_id),
+                SET responsavel_id = COALESCE(responsavel_id, %s),
                     voluntario_id = %s,
                     status = 'pendente'
                 WHERE id=%s
@@ -1004,6 +1022,11 @@ def _ensure_encontro(cur, pulseira_id: int, responsavel_id: Optional[int] = None
             """, (int(pulseira_id), responsavel_id, int(voluntario_id)))
             return int(cur.lastrowid)
 
+        cur.execute("""
+            UPDATE encontros
+            SET responsavel_id = COALESCE(responsavel_id, %s)
+            WHERE id=%s
+        """, (responsavel_id, encontro_id_atual))
         return encontro_id_atual
 
     cur.execute("""
@@ -1125,7 +1148,6 @@ def _get_ultima_localizacao_para_encontro(cur, encontro_id: int):
         LIMIT 1
     """, (int(encontro_id),))
     return cur.fetchone()
-
 # =================================================================================================================================================================================================================
 # WHATSAPP HELPERS (ajustado)
 # =================================================================================================================================================================================================================
