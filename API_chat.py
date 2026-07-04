@@ -960,21 +960,71 @@ def _resolve_voluntario_por_telefone(cur, tel: Optional[str]) -> Optional[Dict[s
 
 
 def _ensure_encontro(cur, pulseira_id: int, responsavel_id: Optional[int] = None, voluntario_id: Optional[int] = None) -> int:
-    eid = _resolve_encontro_pendente_por_pulseira_id(cur, pulseira_id) or _resolve_encontro_por_pulseira_id(cur, pulseira_id)
-    if eid:
-        cur.execute("""
-            UPDATE encontros
-            SET responsavel_id = COALESCE(%s, responsavel_id),
-                voluntario_id = COALESCE(%s, voluntario_id),
-                status = COALESCE(status, 'pendente')
-            WHERE id=%s
-        """, (responsavel_id, voluntario_id, eid))
-        return int(eid)
+    cur.execute("""
+        SELECT id, voluntario_id, onboarding_whatsapp_enviado
+        FROM encontros
+        WHERE pulseira_id=%s AND status='pendente'
+        ORDER BY id DESC
+        LIMIT 1
+    """, (int(pulseira_id),))
+
+    row = cur.fetchone()
+
+    if row:
+        encontro_id_atual = int(row[0])
+        voluntario_atual = int(row[1]) if row[1] is not None else None
+        template_enviado = int(row[2] or 0)
+
+        if voluntario_id and voluntario_atual == int(voluntario_id):
+            return encontro_id_atual
+
+        if voluntario_id and voluntario_atual is None:
+            cur.execute("""
+                UPDATE encontros
+                SET responsavel_id = COALESCE(%s, responsavel_id),
+                    voluntario_id = %s,
+                    status = 'pendente'
+                WHERE id=%s
+            """, (responsavel_id, int(voluntario_id), encontro_id_atual))
+            return encontro_id_atual
+
+        if voluntario_id and voluntario_atual != int(voluntario_id) and template_enviado == 1:
+            cur.execute("""
+                INSERT INTO encontros (
+                    pulseira_id,
+                    responsavel_id,
+                    voluntario_id,
+                    status,
+                    voluntario_presente,
+                    envio_de_localizacao,
+                    onboarding_whatsapp_enviado,
+                    whatsapp_ultimo_erro
+                )
+                VALUES (%s, %s, %s, 'pendente', 1, 0, 0, NULL)
+            """, (int(pulseira_id), responsavel_id, int(voluntario_id)))
+            return int(cur.lastrowid)
+
+        return encontro_id_atual
 
     cur.execute("""
-        INSERT INTO encontros (pulseira_id, responsavel_id, voluntario_id, status, voluntario_presente, envio_de_localizacao)
-        VALUES (%s, %s, %s, 'pendente', 0, 0)
-    """, (pulseira_id, responsavel_id, voluntario_id))
+        INSERT INTO encontros (
+            pulseira_id,
+            responsavel_id,
+            voluntario_id,
+            status,
+            voluntario_presente,
+            envio_de_localizacao,
+            onboarding_whatsapp_enviado,
+            whatsapp_ultimo_erro
+        )
+        VALUES (%s, %s, %s, 'pendente', %s, 0, 0, NULL)
+    """, (
+        int(pulseira_id),
+        responsavel_id,
+        voluntario_id,
+        1 if voluntario_id else 0
+    ))
+
     return int(cur.lastrowid)
 
 
@@ -1075,7 +1125,6 @@ def _get_ultima_localizacao_para_encontro(cur, encontro_id: int):
         LIMIT 1
     """, (int(encontro_id),))
     return cur.fetchone()
-
 
 # =================================================================================================================================================================================================================
 # WHATSAPP HELPERS (ajustado)
