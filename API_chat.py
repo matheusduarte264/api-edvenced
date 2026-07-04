@@ -3871,6 +3871,7 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
         WHERE e.responsavel_id = %s
           AND e.status = 'pendente'
           AND e.onboarding_whatsapp_enviado = 1
+          AND e.voluntario_id IS NOT NULL
         ORDER BY e.id DESC
         LIMIT 1
     """, (responsavel_id,))
@@ -3896,7 +3897,6 @@ def _resolve_encontro_ativo_do_responsavel(cur, wa_from: str):
 
     _dbg("WHATSAPP/RESOLVE_ENCONTRO/ENCONTRO_OK", payload)
     return payload
-
 
 # =========================
 # GATILHO DE MÍDIAS APÓS CLIQUE DO RESPONSÁVEL
